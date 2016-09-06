@@ -5,8 +5,8 @@
   (syntax-rules (=>)
     [(_ test-name [expr => output-string] ...)
      (set! all-tests
-        (cons 
-           '(test-name [expr string  output-string] ...)
+        (cons
+           '(test-name [expr string output-string] ...)
             all-tests))]))
 
 (define (run-compile expr)
@@ -14,8 +14,13 @@
     (compile-program expr p)
     (close-output-port p)))
 
+(define (assemble)
+  (unless (zero? (system "PATH=/usr/local/bin nasm -f macho64 stst.s -o stst.o"))
+    (error 'make "could not assemble")))
+
 (define (build)
-  (unless (zero? (system "gcc -o stst startup.c stst.s"))
+  (assemble)
+  (unless (zero? (system "gcc -o stst startup.c stst.o"))
     (error 'make "could not build target")))
 
 (define (execute)
@@ -56,13 +61,13 @@
      [(string) (test-with-string-output test-id expr out)]
      [else (error 'test "invalid test type ~s" type)])
     (printf " ok\n")))
- 
+
 (define (test-all)
   (let f ([i 0] [ls (reverse all-tests)])
     (if (null? ls)
         (printf "passed all ~s tests\n" i)
         (let ([x (car ls)] [ls (cdr ls)])
-          (let* ([test-name (car x)] 
+          (let* ([test-name (car x)]
                  [tests (cdr x)]
                  [n (length tests)])
             (printf "Performing ~a tests ...\n" test-name)
