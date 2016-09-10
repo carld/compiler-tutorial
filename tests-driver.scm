@@ -9,47 +9,42 @@
            '(test-name [expr string output-string] ...)
             all-tests))]))
 
-(define (run-compile expr)
-  (let ([p (open-output-file "stst.s" 'replace)])
-    (compile-program expr p)
-    (close-output-port p)))
-
-(define (assemble)
-  (unless (zero? (system "PATH=/usr/local/bin nasm -f macho64 stst.s -o stst.o"))
-    (error 'make "could not assemble")))
+;(define (run-compile expr)
+;  (let ([p (open-output-file "stst.s" 'replace)])
+;    (emit-program expr p)
+;    (close-output-port p)))
 
 (define (build)
-  (assemble)
-  (unless (zero? (system "gcc -o stst startup.c stst.o"))
+  (unless (zero? (system "make"))
     (error 'make "could not build target")))
 
-(define (execute)
-  (unless (zero? (system "./stst > stst.out"))
-    (error 'make "produced program exited abnormally")))
+;(define (execute)
+;  (unless (zero? (system "./stst > stst.out"))
+;    (error 'make "produced program exited abnormally")))
 
 
-(define (build-program expr)
-   (run-compile expr)
-   (build))
+;(define (build-program expr)
+;   (run-compile expr)
+;   (build))
 
-(define (get-string)
-  (with-output-to-string
-    (lambda ()
-      (with-input-from-file "stst.out"
-        (lambda ()
-          (let f ()
-            (let ([c (read-char)])
-              (cond
-               [(eof-object? c) (void)]
-               [else (display c) (f)]))))))))
-
-(define (test-with-string-output test-id expr expected-output)
-   (run-compile expr)
-   (build)
-   (execute)
-   (unless (string=? expected-output (get-string))
-     (error 'test "output mismatch for test ~s, expected ~s, got ~s"
-        test-id expected-output (get-string))))
+;(define (get-string)
+;  (with-output-to-string
+;    (lambda ()
+;      (with-input-from-file "stst.out"
+;        (lambda ()
+;          (let f ()
+;            (let ([c (read-char)])
+;              (cond
+;               [(eof-object? c) (void)]
+;               [else (display c) (f)]))))))))
+;
+;(define (test-with-string-output test-id expr expected-output)
+;   (run-compile expr)
+;   (build)
+;   (execute)
+;   (unless (string=? expected-output (get-string))
+;     (error 'test "output mismatch for test ~s, expected ~s, got ~s"
+;        test-id expected-output (get-string))))
 
 (define (test-one test-id test)
   (let ([expr (car test)]
@@ -59,7 +54,7 @@
     (flush-output-port)
     (case type
      [(string) (test-with-string-output test-id expr out)]
-     [else (error 'test "invalid test type ~s" type)])
+     [else (errorf 'test "invalid test type ~s" type)])
     (printf " ok\n")))
 
 (define (test-all)
@@ -83,7 +78,7 @@
   (make-parameter (lambda (x) x)
     (lambda (x)
       (unless (procedure? x)
-        (error 'input-filter "not a procedure ~s" x))
+        (errorf 'input-filter "not a procedure ~s" x))
       x)))
 
 (define runtime-file 
@@ -99,7 +94,7 @@
     (current-output-port)
     (lambda (p)
        (unless (output-port? p) 
-         (error 'compile-port "not an output port ~s" p))
+         (errorf 'compile-port "not an output port ~s" p))
        p)))
 
 (define show-compiler-output (make-parameter #f))
@@ -107,7 +102,7 @@
 (define (run-compile expr)
   (let ([p (open-output-file "stst.s" 'replace)])
     (parameterize ([compile-port p])
-       (compile-program expr))
+       (emit-program expr))
     (close-output-port p)))
 
 
@@ -131,7 +126,7 @@
    (build)
    (execute)
    (unless (string=? expected-output (get-string))
-     (error 'test "output mismatch for test ~s, expected ~s, got ~s"
+     (errorf 'test "output mismatch for test ~s, expected ~s, got ~s"
         test-id expected-output (get-string))))
 
 (define (emit . args)
