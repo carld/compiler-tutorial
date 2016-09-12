@@ -1,0 +1,12 @@
+os:
+  - osx
+language:
+  - c
+before_install:
+  - brew update
+  - brew install --HEAD michaelballantyne/homebrew-chez/chez-scheme
+  - brew install nasm
+  - brew unlink gcc
+  - brew install gcc
+script:
+  - chez --script auto.scm
