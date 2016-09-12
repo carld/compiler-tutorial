@@ -15,4 +15,30 @@
   [(if (char? 12) 13 14) => "14\n"]
   [(if (char? #\a) 13 14) => "13\n"]
   [($fxadd1 (if ($fxsub1 1) ($fxsub1 13) 14)) => "13\n"]
+
+  ; introduced tests for 'and
+  [(and #t) => "#t\n"]
+  [(and #f) => "#f\n"]
+  [(and #t #t) => "#t\n"]
+  [(and #f #f) => "#f\n"]
+  [(and #f #t) => "#f\n"]
+  [(and #f #f) => "#f\n"]
+  [(and #t #t #t) => "#t\n"]
+  [(and #f #t #t) => "#f\n"]
+  [(and #t #f #t) => "#f\n"]
+  [(and #t #t #f) => "#f\n"]
+  [(and #f #f #f) => "#f\n"]
+
+  ; introduced tests for 'or
+  [(or #t) => "#t\n"]
+  [(or #f) => "#f\n"]
+  [(or #t #t) => "#t\n"]
+  [(or #f #f) => "#f\n"]
+  [(or #f #t) => "#t\n"]
+  [(or #f #f) => "#f\n"]
+  [(or #t #t #t) => "#t\n"]
+  [(or #f #t #t) => "#t\n"]
+  [(or #t #f #t) => "#t\n"]
+  [(or #t #t #f) => "#t\n"]
+  [(or #f #f #f) => "#f\n"]
 )

@@ -3,6 +3,7 @@
 (load "tests-1.1-req.scm")
 (load "tests-1.2-req.scm")
 (load "tests-1.3-req.scm")
+(load "tests-1.4-req.scm")
 
 (define fxshift    2)
 (define fxmask  #x03)
@@ -46,6 +47,18 @@
 (define (primitive? x)
   (and (symbol? x) (getprop x '*is-prim*)))
 
+(define (if? expr) ; test body-when-true body-when-false)
+  (and (list? expr)
+       (equal? (car expr) 'if)))
+
+(define (and? expr)
+  (and (list? expr)
+       (equal? (car expr) 'and)))
+
+(define (or? expr)
+  (and (list? expr)
+       (equal? (car expr) 'or)))
+
 (define (primitive-emitter x)
   (or (getprop x '*emitter*) (error 'primitive-emitter "missing emitter for" x)))
 
@@ -63,9 +76,49 @@
 (define (emit-immediate expr)
   (emit "  mov rax, ~s" (immediate-rep expr)))
 
+(define (if-test expr)
+  (cadr expr))
+
+(define (if-conseq expr)
+  (caddr expr))
+
+(define (if-altern expr)
+  (cadddr expr))
+
+(define (emit-if expr)
+  (let ([alt-label (unique-label)]
+        [end-label (unique-label)])
+    (emit-expr (if-test expr))
+    (emit "  cmp al, ~s" bool-f)
+    (emit "  je ~a" alt-label)
+    (emit-expr (if-conseq expr))
+    (emit "  jmp ~a" end-label)
+    (emit "~a:" alt-label)
+    (emit-expr (if-altern expr))
+    (emit "~a:" end-label)))
+
+; (and a b ...)
+; (if a (if b #t #f) #f)
+(define (transform-and expr)
+  (let conseq ([i (cdr expr)])
+    (if (null? i)
+      #t
+      `(if ,(car i) ,(conseq (cdr i)) #f))))
+
+; (or a b ...)
+; (if a #t (if b #t #f) #f)
+(define (transform-or expr)
+  (let altern ([i (cdr expr)])
+    (if (null? i)
+      #f
+      `(if ,(car i) #t ,(altern (cdr i))))))
+
 (define (emit-expr expr)
   (cond
     [(immediate? expr) (emit-immediate expr)]
+    [(if? expr)        (emit-if expr)]
+    [(and? expr)       (emit-if (transform-and expr))]
+    [(or? expr)        (emit-if (transform-or expr))]
     [(primcall? expr)  (emit-primcall expr)]
     [else (error 'emit-expr "type not supported" expr)]))
 
@@ -89,6 +142,10 @@
 (define-primitive ($fxadd1 arg)
   (emit-expr arg)
   (emit "  add rax, ~s" (immediate-rep 1)))  ; add x, y   x ← x + y
+
+(define-primitive ($fxsub1 arg)
+  (emit-expr arg)
+  (emit "  sub rax, ~s" (immediate-rep 1)))
 
 (define-primitive ($fixnum->char arg)
   (emit-expr arg)                               ; mov rax, arg
@@ -184,4 +241,11 @@
   (emit "  shr rax, ~s" fxshift)
   (emit "  not rax")
   (emit "  shl rax, ~s" fxshift))
+
+(define unique-label
+  (let ([count 0])
+    (lambda ()
+      (let ([L (format "L_~s" count)])
+        (set! count (add1 count))
+        L))))
 
