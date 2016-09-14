@@ -4,11 +4,12 @@
 (load "tests-1.2-req.scm")
 (load "tests-1.3-req.scm")
 (load "tests-1.4-req.scm")
+(load "tests-1.5-req.scm")
 
 (define fxshift    2)
 (define fxmask  #x03)
 (define fxtag   #x00)
-(define wordsize   4)
+(define wordsize   8)
 (define boolmask        #b10111111)
 (define booltag           #b101111)
 (define bool-f  #x2F) ; #b00101111
@@ -25,6 +26,7 @@
   (and (integer? x) (exact? x) (<= fxlower x fxupper)))
 (define (immediate? x)
   (or (fixnum? x) (boolean? x) (char? x) (null? x)))
+
 (define (immediate-rep x)
   (cond
     [(fixnum? x) (ash x fxshift)]
@@ -36,13 +38,13 @@
 
 (define-syntax define-primitive
   (syntax-rules ()
-                [(_ (prim-name arg* ...) b b* ...)
+                [(_ (prim-name si arg* ...) b b* ...)
                  (begin
                    (putprop 'prim-name '*is-prim* #t)
                    (putprop 'prim-name '*arg-count*
                             (length '(arg* ...)))
                    (putprop 'prim-name '*emitter*
-                            (lambda (arg* ...) b  b* ...)))]))
+                            (lambda (si arg* ...) b  b* ...)))]))
 
 (define (primitive? x)
   (and (symbol? x) (getprop x '*is-prim*)))
@@ -68,10 +70,10 @@
 (define (check-primcall-args prim args)
   (equal? (length args) (getprop prim '*arg-count*)))
 
-(define (emit-primcall expr)
+(define (emit-primcall si expr)
   (let ([prim (car expr)] [args (cdr expr)])
     (check-primcall-args prim args)
-    (apply (primitive-emitter prim) args)))
+    (apply (primitive-emitter prim) si args)))
 
 (define (emit-immediate expr)
   (emit "  mov rax, ~s" (immediate-rep expr)))
@@ -85,16 +87,16 @@
 (define (if-altern expr)
   (cadddr expr))
 
-(define (emit-if expr)
+(define (emit-if si expr)
   (let ([alt-label (unique-label)]
         [end-label (unique-label)])
-    (emit-expr (if-test expr))
+    (emit-expr si (if-test expr))
     (emit "  cmp al, ~s" bool-f)
     (emit "  je ~a" alt-label)
-    (emit-expr (if-conseq expr))
+    (emit-expr si (if-conseq expr))
     (emit "  jmp ~a" end-label)
     (emit "~a:" alt-label)
-    (emit-expr (if-altern expr))
+    (emit-expr si (if-altern expr))
     (emit "~a:" end-label)))
 
 ; (and a b ...)
@@ -113,23 +115,29 @@
       #f
       `(if ,(car i) #t ,(altern (cdr i))))))
 
-(define (emit-expr expr)
+(define (emit-expr si expr)
   (cond
     [(immediate? expr) (emit-immediate expr)]
-    [(if? expr)        (emit-if expr)]
-    [(and? expr)       (emit-if (transform-and expr))]
-    [(or? expr)        (emit-if (transform-or expr))]
-    [(primcall? expr)  (emit-primcall expr)]
+    [(if? expr)        (emit-if si expr)]
+    [(and? expr)       (emit-if si (transform-and expr))]
+    [(or? expr)        (emit-if si (transform-or expr))]
+    [(primcall? expr)  (emit-primcall si expr)]
     [else (error 'emit-expr "type not supported" expr)]))
 
 (define (emit-program expr)
-  (emit-function-header "scheme_entry")
-  (emit-expr expr)
+  (emit-function-header "L_scheme_entry")
+  (emit-expr (- wordsize) expr)
+  (emit "  ret")
+  (emit-function-header "_scheme_entry")
+  (emit "  mov rcx, rsp")  ; save the C stack pointer
+  (emit "  mov [rsp + 8], rsp") ; stack base argument?
+  (emit "  call L_scheme_entry")  ; push instruction pointer on stack and jmp
+  (emit "  mov rsp, rcx")  ; restore the C stack pointer
   (emit "  ret"))
 
 (define (emit-function-header name)
-  (emit "global _~a" name)
-  (emit "_~a:" name))
+  (emit "global ~a" name)
+  (emit "~a:" name))
 
 ; The primitive fxadd1 takes one argument, which must evaluate to a fixnum, and
 ; returns that value incremented by 1. The implemen- tation of fxadd1 should
@@ -139,16 +147,16 @@
 ; computed value should be placed back in %eax. Remember though that all the
 ; fixnums in our system are shifted to the left by two. So, a fxadd1 instruction
 ; translates to an instruction that increments %eax by 4.
-(define-primitive ($fxadd1 arg)
-  (emit-expr arg)
+(define-primitive ($fxadd1 si arg)
+  (emit-expr si arg)
   (emit "  add rax, ~s" (immediate-rep 1)))  ; add x, y   x ← x + y
 
-(define-primitive ($fxsub1 arg)
-  (emit-expr arg)
+(define-primitive ($fxsub1 si arg)
+  (emit-expr si arg)
   (emit "  sub rax, ~s" (immediate-rep 1)))
 
-(define-primitive ($fixnum->char arg)
-  (emit-expr arg)                               ; mov rax, arg
+(define-primitive ($fixnum->char si arg)
+  (emit-expr si arg)                            ; mov rax, arg
   (emit "  shl rax, ~s" (- charshift fxshift))  ; shift left 8 - 2 = 6 bits
   (emit "  or  rax, ~s" chartag))               ; or 00001111
 
@@ -159,8 +167,8 @@
 ; by six bits to obtain the fixnum value. The primitive fixnum->char should
 ; shift the fixnum value to the left, then tag the result with the character
 ; tag. Tagging a value is performed using the instruction orl.
-(define-primitive ($char->fixnum arg)
-  (emit-expr arg)  ; mov rax, arg
+(define-primitive ($char->fixnum si arg)
+  (emit-expr si arg)  ; mov rax, arg
   (emit "  shr rax, ~s" (- charshift fxshift))
   (emit "  and rax, ~s" (lognot fxmask)))
 
@@ -182,8 +190,8 @@
 ; comparison is shifted to the left by an appropriate number of bits and or’ed
 ; with the false value 00101111b to obtain either the false value or the true
 ; value 01101111b.
-(define-primitive (fixnum? arg)
-  (emit-expr arg)
+(define-primitive (fixnum? si arg)
+  (emit-expr si arg)
   (emit "  and al, ~s" fxmask)
   (emit "  cmp al, ~s" fxtag)
   (emit "  sete al")  ; set equal: set to 1 otherwise 0 on condition (ZF=0)
@@ -191,53 +199,44 @@
   (emit "  sal al, ~s" bool-bit)
   (emit "  or  al, ~s" bool-f))
 
-(define-primitive ($fxzero? arg)
-  (emit-expr arg)
+(define (emit-true-when-equal)
+  (emit "  sete al")  ; set equal: set to 1 otherwise 0 on condition (ZF=0)
+  (emit "  movsx rax, al")
+  (emit "  sal al, ~s" bool-bit)
+  (emit "  or  al, ~s" bool-f))
+
+(define-primitive ($fxzero? si arg)
+  (emit-expr si arg)
   (emit "  cmp rax, 0")
-  (emit "  sete al")
-  (emit "  movsx rax, al")
-  (emit "  sal al, ~s" bool-bit)
-  (emit "  or  al, ~s" bool-f))
+  (emit-true-when-equal))
 
-(define-primitive (null? arg)
-  (emit-expr arg)
+(define-primitive (null? si arg)
+  (emit-expr si arg)
   (emit "  cmp al, ~s" niltag)
-  (emit "  sete al")
-  (emit "  movsx rax, al")
-  (emit "  sal al, ~s" bool-bit)
-  (emit "  or  al, ~s" bool-f))
+  (emit-true-when-equal))
 
-(define-primitive (boolean? arg)
-  (emit-expr arg)
+(define-primitive (boolean? si arg)
+  (emit-expr si arg)
   (emit "  and rax, ~s" boolmask)
   (emit "  cmp rax, ~s" bool-f)
-  (emit "  sete al")
-  (emit "  movsx rax, al")
-  (emit "  sal al, ~s" bool-bit)
-  (emit "  or  al, ~s" bool-f))
+  (emit-true-when-equal))
 
-(define-primitive (char? arg)
-  (emit-expr arg)
+(define-primitive (char? si arg)
+  (emit-expr si arg)
   (emit "  and rax, ~s" charmask)
   (emit "  cmp rax, ~s" chartag)
-  (emit "  sete al")
-  (emit "  movsx rax, al")
-  (emit "  sal al, ~s" bool-bit)
-  (emit "  or  al, ~s" bool-f))
+  (emit-true-when-equal))
 
 ; The primitive not takes any kind of value and returns #t if the object is #f,
 ; otherwise it returns #f.
 ;  (emit "  xor rax, ~s" #b01000000) ; not so simple
-(define-primitive (not arg)
-  (emit-expr arg)
+(define-primitive (not si arg)
+  (emit-expr si arg)
   (emit "  cmp rax, ~s" bool-f)
-  (emit "  sete al")  ; set equal: set to 1 otherwise 0 on condition (ZF=0)
-  (emit "  movsx rax, al")
-  (emit "  sal al, ~s" bool-bit)
-  (emit "  or al, ~s" bool-f))
+  (emit-true-when-equal))
 
-(define-primitive ($fxlognot arg)
-  (emit-expr arg)
+(define-primitive ($fxlognot si arg)
+  (emit-expr si arg)
   (emit "  shr rax, ~s" fxshift)
   (emit "  not rax")
   (emit "  shl rax, ~s" fxshift))
@@ -248,4 +247,124 @@
       (let ([L (format "L_~s" count)])
         (set! count (add1 count))
         L))))
+
+(define-primitive (fx+ si arg1 arg2)
+  (emit-expr si arg1)
+  (emit "  mov [rsp + ~s], rax" si)
+  (emit-expr (- si wordsize) arg2)
+  (emit "  add rax, [rsp + ~s]" si))
+
+; Not sure why subtracting signed numbers don't need to be
+; right shifted (untagged) here.
+; Note the arguments go on the stack in reverse order
+(define-primitive (fx- si arg1 arg2)
+  (emit-expr si arg2)   ; rax <- arg1
+  (emit "  mov [rsp + ~s], rax" si) ; push?
+  (emit-expr (- si wordsize) arg1)
+  (emit "  sub rax, [rsp + ~s]" si))
+
+(define-primitive (fx* si arg1 arg2)
+   (emit-expr si arg2)   ; eval arg and put in rax
+   (emit "  mov [rsp + ~s], rax" si)
+   (emit-expr (- si wordsize) arg1) ; eval arg and put in rax
+   (emit "  mov [rsp + ~s], rax" (- si wordsize))
+   (emit "  mov eax, [rsp + ~s]" si)
+   (emit "  mov ebx, [rsp + ~s]" (- si wordsize))
+   (emit "  imul ebx") ; eax * ebx
+   (emit "  mov ebx, 4")
+   (emit "  idiv ebx")) ; eax / ebx
+
+(define-primitive (fxlogor si arg1 arg2)
+   (emit-expr si arg2)
+   (emit "  mov [rsp + ~s], rax" si)
+   (emit-expr (- si wordsize) arg1)
+   (emit "  mov [rsp + ~s], rax" (- si wordsize))
+   (emit "  mov rax, [rsp + ~s]" si)
+   (emit "  mov rbx, [rsp + ~s]" (- si wordsize))
+   (emit "  or rax, rbx"))
+
+(define-primitive (fxlognot si arg1)
+  (emit-expr si arg1)
+  (emit "  shr rax, ~s" fxshift)
+  (emit "  not rax")
+  (emit "  shl rax, ~s" fxshift))
+
+(define-primitive (fxlogand si arg1 arg2)
+  (emit-expr si arg2)
+  (emit "  mov [rsp + ~s], rax" si)
+  (emit-expr (- si wordsize) arg1)
+  (emit "  mov [rsp + ~s], rax" (- si wordsize))
+  (emit "  mov rax, [rsp + ~s]" si)
+  (emit "  mov rbx, [rsp + ~s]" (- si wordsize))
+  (emit "  and rax, rbx"))
+
+(define-primitive (fx= si arg1 arg2)
+  (emit-expr si arg2)
+  (emit "  mov [rsp + ~s], rax" si)
+  (emit-expr (- si wordsize) arg1)
+  (emit "  mov [rsp + ~s], rax" (- si wordsize))
+  (emit "  mov rax, [rsp + ~s]" si)
+  (emit "  mov rbx, [rsp + ~s]" (- si wordsize))
+  (emit "  cmp rax, rbx")
+  (emit-true-when-equal))
+
+(define-primitive (fx< si arg1 arg2)
+  (let ([true-label (unique-label)]
+        [end-label (unique-label)])
+  (emit-expr si arg2)
+  (emit "  mov [rsp + ~s], rax" si)
+  (emit-expr (- si wordsize) arg1)
+  (emit "  mov [rsp + ~s], rax" (- si wordsize))
+  (emit "  mov rbx, [rsp + ~s]" si)
+  (emit "  mov rax, [rsp + ~s]" (- si wordsize))
+  (emit "  cmp rax, rbx")
+  (emit "  setl al")
+  (emit "  movsx rax, al")
+  (emit "  sal al, ~s" bool-bit)
+  (emit "  or  al, ~s" bool-f)))
+
+(define-primitive (fx<= si arg1 arg2)
+  (let ([true-label (unique-label)]
+        [end-label (unique-label)])
+  (emit-expr si arg2)
+  (emit "  mov [rsp + ~s], rax" si)
+  (emit-expr (- si wordsize) arg1)
+  (emit "  mov [rsp + ~s], rax" (- si wordsize))
+  (emit "  mov rbx, [rsp + ~s]" si)
+  (emit "  mov rax, [rsp + ~s]" (- si wordsize))
+  (emit "  cmp rax, rbx")
+  (emit "  setle al")
+  (emit "  movsx rax, al")
+  (emit "  sal al, ~s" bool-bit)
+  (emit "  or  al, ~s" bool-f)))
+
+(define-primitive (fx> si arg1 arg2)
+  (let ([true-label (unique-label)]
+        [end-label (unique-label)])
+  (emit-expr si arg2)
+  (emit "  mov [rsp + ~s], rax" si)
+  (emit-expr (- si wordsize) arg1)
+  (emit "  mov [rsp + ~s], rax" (- si wordsize))
+  (emit "  mov rbx, [rsp + ~s]" si)
+  (emit "  mov rax, [rsp + ~s]" (- si wordsize))
+  (emit "  cmp rax, rbx")
+  (emit "  setg al")
+  (emit "  movsx rax, al")
+  (emit "  sal al, ~s" bool-bit)
+  (emit "  or  al, ~s" bool-f)))
+
+(define-primitive (fx>= si arg1 arg2)
+  (let ([true-label (unique-label)]
+        [end-label (unique-label)])
+  (emit-expr si arg2)
+  (emit "  mov [rsp + ~s], rax" si)
+  (emit-expr (- si wordsize) arg1)
+  (emit "  mov [rsp + ~s], rax" (- si wordsize))
+  (emit "  mov rbx, [rsp + ~s]" si)
+  (emit "  mov rax, [rsp + ~s]" (- si wordsize))
+  (emit "  cmp rax, rbx")
+  (emit "  setge al")
+  (emit "  movsx rax, al")
+  (emit "  sal al, ~s" bool-bit)
+  (emit "  or  al, ~s" bool-f)))
 

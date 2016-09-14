@@ -1,5 +1,7 @@
 #include <stdio.h>
 #include <ctype.h>
+#include <sys/mman.h>
+#include <unistd.h>
 #define bool_f      0x2F
 #define bool_t      0x6F
 #define bool_mask   0xBF //?
@@ -44,8 +46,45 @@ static void print_ptr(ptr x) {
   }
   printf("\n");
 }
+
+static char * allocate_protected_space(int size) {
+  int page = getpagesize();
+  int status;
+  int aligned_size = ((size + page - 1) / page) * page;
+  char * p = mmap(0, aligned_size + 2 * page, 
+                  PROT_READ | PROT_WRITE,
+                  MAP_ANONYMOUS | MAP_PRIVATE,
+                  0, 0);
+  if (p == MAP_FAILED) {
+    perror("mmap");
+  }
+  status = mprotect(p, page, PROT_NONE);
+  if (status != 0) {
+    perror("mprotect");
+  }
+  status = mprotect(p + page + aligned_size, page, PROT_NONE);
+  if (status != 0) {
+    perror("mprotect");
+  }
+  return (p + page);
+}
+
+static void deallocate_protected_space(char *p, int size) {
+  int page = getpagesize();
+  int status;
+  int aligned_size = ((size + page - 1) / page) * page;
+  status = munmap(p - page, aligned_size + 2 * page);
+  if (status != 0) {
+    perror("munmap");
+  }
+}
+
 extern int scheme_entry();
 int main(int argc, char *argv[]) {
-  print_ptr(scheme_entry());
+  int stack_size = (16 * 4096); /* holds 16K cells */
+  char * stack_top = allocate_protected_space(stack_size);
+  char * stack_base = stack_top + stack_size;
+  print_ptr(scheme_entry(stack_base));
+  deallocate_protected_space(stack_top, stack_size);
   return 0;
 }
