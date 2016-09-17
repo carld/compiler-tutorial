@@ -1,5 +1,5 @@
 #include <stdio.h>
-#include <ctype.h>
+#include <sys/types.h>
 #include <sys/mman.h>
 #include <unistd.h>
 #define bool_f      0x2F
@@ -16,14 +16,13 @@
 
 #define nil_tag     0x3F
 
-const char *ascii_table[0x7F] = {
+const char *ascii_table[0x80] = {
  "nul",       "soh",    "stx",     "etx",   "eot", "enq",    "ack",  "bel",
  "backspace", "tab",    "newline", "vt",    "np",  "return", "so",   "si",
  "dle",       "dc1",    "dc2",     "dc3",   "dc4", "nak",    "syn",  "etb",
  "can",       "em",     "sub",     "esc",   "fs",  "gs",     "rs",   "us",
  "space"
 };
-
 typedef unsigned int ptr;
 static void print_ptr(ptr x) {
   if ((x & fx_mask) == fx_tag) {
@@ -35,8 +34,8 @@ static void print_ptr(ptr x) {
   } else if (x == nil_tag) {
     printf("()");
   } else if ((x & char_mask) == char_tag) {
-    char c = (char)(x >> char_shift);
-    if (iscntrl(c) || isspace(c)) {
+    int c = (int)(x >> char_shift);
+    if (0 <= c && c <= 0x20) {
       printf("#\\%s", ascii_table[c]);
     } else {
       printf("#\\%c", c);
@@ -81,9 +80,13 @@ static void deallocate_protected_space(char *p, int size) {
 
 extern int scheme_entry();
 int main(int argc, char *argv[]) {
-  int stack_size = (16 * 4096); /* holds 16K cells */
+  int stack_size = (32768 * 4096); /* holds 16K cells */
   char * stack_top = allocate_protected_space(stack_size);
   char * stack_base = stack_top + stack_size;
+  /*
+  register char *r8 asm ("r8") = stack_top;
+  register char *r9 asm ("r9") = stack_base;
+  */
   print_ptr(scheme_entry(stack_base));
   deallocate_protected_space(stack_top, stack_size);
   return 0;

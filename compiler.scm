@@ -6,6 +6,8 @@
 (load "tests-1.4-req.scm")
 (load "tests-1.5-req.scm")
 (load "tests-1.6-req.scm")
+(load "tests-1.7-req.scm")
+;(load "tests-1.8-req.scm")
 
 (define fxshift    2)
 (define fxmask  #x03)
@@ -29,6 +31,8 @@
   (or (fixnum? x) (boolean? x) (char? x) (null? x)))
 (define (variable? x)
   (symbol? x))
+(define (letrec? x)
+  (and (list? x) (not (null? x)) (equal? (car x) 'letrec)))
 
 (define (immediate-rep x)
   (cond
@@ -47,7 +51,7 @@
                    (putprop 'prim-name '*arg-count*
                             (length '(arg* ...)))
                    (putprop 'prim-name '*emitter*
-                            (lambda (si env arg* ...) b  b* ...)))]))
+                            (lambda (si env arg* ...) b b* ...)))]))
 
 (define (primitive? x)
   (and (symbol? x) (getprop x '*is-prim*)))
@@ -82,8 +86,8 @@
     (check-primcall-args prim args)
     (apply (primitive-emitter prim) si env args)))
 
-(define (emit-immediate expr)
-  (emit "  mov rax, ~s" (immediate-rep expr)))
+(define (emit-immediate si expr)
+  (emit "  mov rax, ~s;  immediate" (immediate-rep expr)))
 
 (define (let-bindings expr)
   (cadr expr))
@@ -108,7 +112,7 @@
   (car x))
 
 (define (emit-stack-save si)
-  (emit "  mov [rsp + ~s], eax" si))
+  (emit "  mov [rsp + ~s], rax;  save to stack" si))
 
 (define (next-stack-index si)
   (- si wordsize))
@@ -116,6 +120,7 @@
 (define (extend-env var si env)
   (cons (cons var si) env))
 
+; todo: implement let*
 (define (emit-let si env expr)
   (define (process-let bindings si new-env)
     (cond
@@ -130,15 +135,19 @@
                        (extend-env (lhs b) si new-env)))]))
   (process-let (let-bindings expr) si env))
 
-(define (lookup v e)
-  (cdr (assoc v e)))
+(define (lookup var alist)
+  (let ((val (assoc var alist)))
+    (cond
+      ;[(list? val)  (cadr val)]
+      [(pair? val)  (cdr val)]
+      [else (error 'lookup "can't find" var alist)])))
 
 (define (emit-stack-load si)
-  (emit "  mov rax, [rsp + ~s]" si))
+  (emit "  mov rax, [rsp + ~s]; load from stack" si))
 
-(define (emit-variable-ref env var)
+(define (emit-variable-ref env expr)
   (cond
-    [(lookup var env) => emit-stack-load]
+    [(lookup expr env) => emit-stack-load]
     [else (error 'emit-variable-ref "could not find variable ref." var)]))
 
 (define (if-test expr)
@@ -155,9 +164,9 @@
         [end-label (unique-label)])
     (emit-expr si env (if-test expr))
     (emit "  cmp al, ~s" bool-f)
-    (emit "  je ~a" alt-label)
+    (emit "  je ~a;   jump to else" alt-label)
     (emit-expr si env (if-conseq expr))
-    (emit "  jmp ~a" end-label)
+    (emit "  jmp ~a;  jump to end" end-label)
     (emit "~a:" alt-label)
     (emit-expr si env (if-altern expr))
     (emit "~a:" end-label)))
@@ -178,27 +187,107 @@
       #f
       `(if ,(car i) #t ,(altern (cdr i))))))
 
+(define (unique-labels lvars)
+  (map (lambda (lvar)
+         (format "~a_~a" (unique-label) lvar)) lvars))
+
+(define letrec-bindings let-bindings)
+(define letrec-body let-body)
+
+(define (make-initial-env lvars labels)
+  (map cons lvars labels))
+
+(define (emit-scheme-entry expr env)
+  (emit-function-header "L_scheme_entry" )
+  (emit-expr (- wordsize) env expr)
+  (emit "  ret"))
+
+; for now letrec is only at the top of the stack
+(define (emit-letrec expr)
+  (let* ([bindings (letrec-bindings expr)]
+         [lvars (map lhs bindings)]
+         [lambdas (map rhs bindings)]
+         [labels (unique-labels lvars)]
+         [env (make-initial-env lvars labels)])
+    (for-each (emit-lambda env) lambdas labels)
+    (emit-scheme-entry (letrec-body expr) env)))
+
+(define (lambda-formals expr)
+  (cadr expr))
+
+(define (lambda-body expr)
+  (caddr expr))
+
+(define (emit-lambda env)
+  (lambda (expr label)
+    (emit-function-header label)
+    (let ([fmls (lambda-formals expr)]
+          [body (lambda-body expr)])
+      (let f ([fmls fmls] [si (- wordsize)] [env env])
+        (cond
+          [(empty? fmls)  ; emit expression
+              (begin
+                (emit-expr si env body)
+                (emit "  ret;  return from lambda body"))]
+          [else  ; move stack index downwards to accomodate argument,
+                 ; and add stack index for formal to environment
+            (f (rest fmls)
+               (- si wordsize)
+               (extend-env (first fmls) si env))])))))
+
+(define (call-args expr)
+  (cdr expr))
+
+(define (emit-adjust-base si)
+  (if (>= 0 si)
+    (emit "  sub rsp, ~s; adjust base" (- si))
+    (emit "  add rsp, ~s; adjust base" si)))
+
+(define (call-target expr)
+  (car expr))
+
+(define (emit-call si label)
+  (emit "  call ~a" label))
+
+(define (emit-app si env expr)
+  (define (emit-arguments si args)
+    (unless (empty? args)
+      (emit-expr si env (first args))
+      (emit-stack-save si)
+      (emit-arguments (- si wordsize) (rest args))))
+  (emit-arguments (- si wordsize) (call-args expr))
+  (emit-adjust-base (+ si wordsize))
+  (emit-call si (lookup (call-target expr) env))
+  (emit-adjust-base (- (+ si wordsize))))
+
+(define (app? expr env)
+  (and (list? expr)
+       (not (null? expr))
+       (or (equal? (car expr) 'app)
+           (lookup (car expr) env))))
+
 (define (emit-expr si env expr)
   (cond
-    [(immediate? expr) (emit-immediate expr)]
-    [(variable? expr)  (emit-variable-ref env expr)]
+    [(immediate? expr) (emit-immediate si expr)]
+    [(variable? expr)  (emit-variable-ref env expr)] ; gets si from env
     [(if? expr)        (emit-if si env expr)]
     [(and? expr)       (emit-if si env (transform-and expr))]
     [(or? expr)        (emit-if si env (transform-or expr))]
     [(let? expr)       (emit-let si env expr)]
     [(primcall? expr)  (emit-primcall si env expr)]
+    [(app? expr env)   (emit-app si env (if (equal? (car expr) 'app) (cdr expr) expr))] ; primitives shadow environment?
     [else (error 'emit-expr "type not supported" expr)]))
 
 (define (emit-program expr)
-  (emit-function-header "L_scheme_entry")
-  (emit-expr (- wordsize) '() expr)
-  (emit "  ret")
+  (if (letrec? expr)
+    (emit-letrec expr)
+    (emit-scheme-entry expr '()))
   (emit-function-header "_scheme_entry")
   (emit "  mov rcx, rsp")  ; save the C stack pointer
-  (emit "  mov [rsp + 8], rsp") ; stack base argument?
-  (emit "  call L_scheme_entry")  ; push instruction pointer on stack and jmp
+  (emit "  mov rsp, rdi") ; allocated stack base argument, calling convention puts it in rdi ...
+  (emit "  call L_scheme_entry")  ; push rip to rsp and jmp
   (emit "  mov rsp, rcx")  ; restore the C stack pointer
-  (emit "  ret"))
+  (emit "  ret")) ; pop rsp and jump
 
 (define (emit-function-header name)
   (emit "global ~a" name)
@@ -216,7 +305,15 @@
   (emit-expr si env arg)
   (emit "  add rax, ~s" (immediate-rep 1)))  ; add x, y   x ← x + y
 
+(define-primitive (fxadd1 si env arg)
+  (emit-expr si env arg)
+  (emit "  add rax, ~s" (immediate-rep 1)))  ; add x, y   x ← x + y
+
 (define-primitive ($fxsub1 si env arg)
+  (emit-expr si env arg)
+  (emit "  sub rax, ~s" (immediate-rep 1)))
+
+(define-primitive (fxsub1 si env arg)
   (emit-expr si env arg)
   (emit "  sub rax, ~s" (immediate-rep 1)))
 
@@ -275,6 +372,11 @@
   (emit "  cmp rax, 0")
   (emit-true-when-equal))
 
+(define-primitive (fxzero? si env arg)
+  (emit-expr si env arg)
+  (emit "  cmp rax, 0")
+  (emit-true-when-equal))
+
 (define-primitive (null? si env arg)
   (emit-expr si env arg)
   (emit "  cmp al, ~s" niltag)
@@ -315,9 +417,9 @@
 
 (define-primitive (fx+ si env arg1 arg2)
   (emit-expr si env arg1)
-  (emit "  mov [rsp + ~s], rax" si)
+  (emit "  mov [rsp + ~s], rax;  put on stack" si)
   (emit-expr (- si wordsize) env arg2)
-  (emit "  add rax, [rsp + ~s]" si))
+  (emit "  add rax, [rsp + ~s];  add stack and rax" si))
 
 ; Not sure why subtracting signed numbers don't need to be
 ; right shifted (untagged) here.
