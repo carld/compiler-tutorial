@@ -282,7 +282,7 @@
   (if (letrec? expr)
     (emit-letrec expr)
     (emit-scheme-entry expr '()))
-  (emit-function-header "_scheme_entry")
+  (emit-function-header (getenv "ENTRY")) ;"scheme_entry")
   (emit "  mov rcx, rsp")  ; save the C stack pointer
   (emit "  mov rsp, rdi") ; allocated stack base argument, calling convention puts it in rdi ...
   (emit "  call L_scheme_entry")  ; push rip to rsp and jmp

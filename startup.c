@@ -1,10 +1,11 @@
 #include <stdio.h>
 #include <sys/types.h>
+#define _GNU_SOURCE  /* MAP_ANONYMOUS is not POSIX */
 #include <sys/mman.h>
 #include <unistd.h>
 #define bool_f      0x2F
 #define bool_t      0x6F
-#define bool_mask   0xBF //?
+#define bool_mask   0xBF
 
 #define fx_mask     0x03
 #define fx_tag      0x00
@@ -78,7 +79,8 @@ static void deallocate_protected_space(char *p, int size) {
   }
 }
 
-extern int scheme_entry();
+extern int scheme_entry(char *);
+
 int main(int argc, char *argv[]) {
   int stack_size = (32768 * 4096); /* holds 16K cells */
   char * stack_top = allocate_protected_space(stack_size);

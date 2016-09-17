@@ -1,12 +1,16 @@
-os:
-  - osx
 language:
   - c
 before_install:
-  - brew update
-  - brew install --HEAD michaelballantyne/homebrew-chez/chez-scheme
-  - brew install nasm
-  - brew unlink gcc
-  - brew install gcc
+  - sudo apt-get update
+  - sudo apt-get install gcc
+  - sudo apt-get install nasm
+cache:
+  directories:
+  - $HOME/build/$TRAVIS_REPO_SLUG/ChezScheme-9.4
+install:
+  - wget --no-clobber https://github.com/cisco/ChezScheme/archive/v9.4.tar.gz
+  - tar zxvf v9.4.tar.gz
+  - sed -i -e "s|/bin/sh|/bin/bash|" ChezScheme-9.4/makefiles/installsh
+  - pushd ChezScheme-9.4 && ./configure && make && sudo make install && popd
 script:
-  - chez --script auto.scm
+  - make test
