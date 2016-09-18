@@ -7,7 +7,7 @@
 (load "tests-1.5-req.scm")
 (load "tests-1.6-req.scm")
 (load "tests-1.7-req.scm")
-;(load "tests-1.8-req.scm")
+(load "tests-1.8-req.scm")
 
 (define fxshift    2)
 (define fxmask  #x03)
@@ -86,7 +86,7 @@
     (check-primcall-args prim args)
     (apply (primitive-emitter prim) si env args)))
 
-(define (emit-immediate si expr)
+(define (emit-immediate expr)
   (emit "  mov rax, ~s;  immediate" (immediate-rep expr)))
 
 (define (let-bindings expr)
@@ -135,12 +135,25 @@
                        (extend-env (lhs b) si new-env)))]))
   (process-let (let-bindings expr) si env))
 
+(define (emit-tail-let si env expr)
+  (define (process-let bindings si new-env)
+    (cond
+      [(empty? bindings)
+       (emit-tail-expr si new-env (let-body expr))]
+      [else
+        (let ([b (first bindings)])
+          (emit-expr si env (rhs b))
+          (emit-stack-save si)
+          (process-let (rest bindings)
+                       (next-stack-index si)
+                       (extend-env (lhs b) si new-env)))]))
+  (process-let (let-bindings expr) si env))
+
 (define (lookup var alist)
   (let ((val (assoc var alist)))
     (cond
-      ;[(list? val)  (cadr val)]
       [(pair? val)  (cdr val)]
-      [else (error 'lookup "can't find" var alist)])))
+      [else #f])))
 
 (define (emit-stack-load si)
   (emit "  mov rax, [rsp + ~s]; load from stack" si))
@@ -163,13 +176,23 @@
   (let ([alt-label (unique-label)]
         [end-label (unique-label)])
     (emit-expr si env (if-test expr))
-    (emit "  cmp al, ~s" bool-f)
+    (emit "  cmp al, ~s;  false?" bool-f)
     (emit "  je ~a;   jump to else" alt-label)
     (emit-expr si env (if-conseq expr))
     (emit "  jmp ~a;  jump to end" end-label)
     (emit "~a:" alt-label)
     (emit-expr si env (if-altern expr))
     (emit "~a:" end-label)))
+
+(define (emit-tail-if si env expr)
+  (let ([alt-label (unique-label)]
+        [end-label (unique-label)])
+    (emit-expr si env (if-test expr))
+    (emit "  cmp al, ~s; false?" bool-f)
+    (emit "  je ~a;   jump to else" alt-label)
+    (emit-tail-expr si env (if-conseq expr))
+    (emit "~a:" alt-label)
+    (emit-tail-expr si env (if-altern expr))))
 
 ; (and a b ...)
 ; (if a (if b #t #f) #f)
@@ -199,8 +222,7 @@
 
 (define (emit-scheme-entry expr env)
   (emit-function-header "L_scheme_entry" )
-  (emit-expr (- wordsize) env expr)
-  (emit "  ret"))
+  (emit-tail-expr (- wordsize) env expr))
 
 ; for now letrec is only at the top of the stack
 (define (emit-letrec expr)
@@ -222,15 +244,13 @@
   (lambda (expr label)
     (emit-function-header label)
     (let ([fmls (lambda-formals expr)]
-          [body (lambda-body expr)])
+          [body (lambda-body expr)])   ; The body of a procedure is in tail position.
       (let f ([fmls fmls] [si (- wordsize)] [env env])
         (cond
           [(empty? fmls)  ; emit expression
-              (begin
-                (emit-expr si env body)
-                (emit "  ret;  return from lambda body"))]
+              (emit-tail-expr si env body)] ; the body of a procedure is in tail position
           [else  ; move stack index downwards to accomodate argument,
-                 ; and add stack index for formal to environment
+                 ; and add stack index to environment
             (f (rest fmls)
                (- si wordsize)
                (extend-env (first fmls) si env))])))))
@@ -260,6 +280,25 @@
   (emit-call si (lookup (call-target expr) env))
   (emit-adjust-base (- (+ si wordsize))))
 
+(define (emit-tail-call label)
+  (emit "  jmp ~a; tail call" label))
+
+; moves arguments on stack adjacent to rsp, discarding local variables.
+(define (emit-tail-app si env expr)
+  (define (emit-arguments si args)
+    (unless (empty? args)
+      (emit-expr si env (first args))
+      (emit-stack-save si)
+      (emit-arguments (- si wordsize) (rest args))))
+  (define (emit-move offset si args)
+    (unless (empty? args)
+      (emit "  mov rax, [rsp + ~s]" si)
+      (emit "  mov [rsp + ~s], rax; move arg ~s" (- si offset) (car args))
+      (emit-move offset (- si wordsize) (rest args))))
+  (emit-arguments si (call-args expr)) ; evaluates args
+  (if (< si (- wordsize)) (emit-move (- si (- wordsize)) si (call-args expr))) ;collapse frame
+  (emit-tail-call (lookup (call-target expr) env)))
+
 (define (app? expr env)
   (and (list? expr)
        (not (null? expr))
@@ -268,7 +307,7 @@
 
 (define (emit-expr si env expr)
   (cond
-    [(immediate? expr) (emit-immediate si expr)]
+    [(immediate? expr) (emit-immediate expr)]
     [(variable? expr)  (emit-variable-ref env expr)] ; gets si from env
     [(if? expr)        (emit-if si env expr)]
     [(and? expr)       (emit-if si env (transform-and expr))]
@@ -277,6 +316,30 @@
     [(primcall? expr)  (emit-primcall si env expr)]
     [(app? expr env)   (emit-app si env (if (equal? (car expr) 'app) (cdr expr) expr))] ; primitives shadow environment?
     [else (error 'emit-expr "type not supported" expr)]))
+
+(define (emit-tail-expr si env expr)
+  (cond
+    [(immediate? expr) (emit-tail-immediate expr)]
+    [(variable? expr)  (emit-tail-variable-ref env expr)]
+    [(if? expr)        (emit-tail-if si env expr)]
+    [(and? expr)       (emit-tail-if si env (transform-and expr))]
+    [(or? expr)        (emit-tail-if si env (transform-or expr))]
+    [(let? expr)       (emit-tail-let si env expr)]
+    [(primcall? expr)  (emit-tail-primcall si env expr)]
+    [(app? expr env)   (emit-tail-app si env (if (equal? (car expr) 'app) (cdr expr) expr))] ; primitives shadow environment?
+    [else (error 'emit-tail-expr "error in expression")]))
+
+(define (emit-tail-immediate expr)
+  (emit-immediate expr)
+  (emit "  ret;  return from tail call"))
+
+(define (emit-tail-variable-ref env expr)
+  (emit-variable-ref env expr)
+  (emit "  ret;  return from tail call"))
+
+(define (emit-tail-primcall si env expr)
+  (emit-primcall si env expr)
+  (emit "  ret;  return from tail call"))
 
 (define (emit-program expr)
   (if (letrec? expr)
