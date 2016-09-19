@@ -1,4 +1,3 @@
-
 (load "tests-driver.scm")
 (load "tests-1.1-req.scm")
 (load "tests-1.2-req.scm")
@@ -31,8 +30,6 @@
   (or (fixnum? x) (boolean? x) (char? x) (null? x)))
 (define (variable? x)
   (symbol? x))
-(define (letrec? x)
-  (and (list? x) (not (null? x)) (equal? (car x) 'letrec)))
 
 (define (immediate-rep x)
   (cond
@@ -40,8 +37,7 @@
     [(boolean? x) (if (equal? x #t) bool-t bool-f)]
     [(char? x)   (logor (ash (char->integer x) charshift) chartag)]
     [(null? x)   niltag]
-    [else (errorf 'immediate-rep "no immediate representation for ~s" x)]
-    ))
+    [else (errorf 'immediate-rep "no immediate representation for ~s" x)]))
 
 (define-syntax define-primitive
   (syntax-rules ()
@@ -56,21 +52,21 @@
 (define (primitive? x)
   (and (symbol? x) (getprop x '*is-prim*)))
 
-(define (if? expr) ; test body-when-true body-when-false)
-  (and (list? expr)
-       (equal? (car expr) 'if)))
+(define (list-starts-with-any? expr val)
+  (and (list? expr) (< 0 (length expr)) (memq (car expr) val)))
 
-(define (and? expr)
-  (and (list? expr)
-       (equal? (car expr) 'and)))
+(define-syntax define-list-head-predicate
+  (syntax-rules ()
+                [(_ (predicate sym* ...))
+                    (define (predicate expr)
+                      (list-starts-with-any? expr (list sym* ...)))]))
 
-(define (or? expr)
-  (and (list? expr)
-       (equal? (car expr) 'or)))
-
-(define (let? expr)
-  (and (list? expr)
-       (equal? (car expr) 'let)))
+(define-list-head-predicate (if? 'if))
+(define-list-head-predicate (and? 'and))
+(define-list-head-predicate (or? 'or))
+(define-list-head-predicate (or? 'or))
+(define-list-head-predicate (let? 'let 'let*))
+(define-list-head-predicate (letrec? 'letrec ))
 
 (define (primitive-emitter x)
   (or (getprop x '*emitter*) (error 'primitive-emitter "missing emitter for" x)))
@@ -81,38 +77,29 @@
 (define (check-primcall-args prim args)
   (equal? (length args) (getprop prim '*arg-count*)))
 
-(define (emit-primcall si env expr)
+(define (emit-primcall si env expr tail?)
   (let ([prim (car expr)] [args (cdr expr)])
     (check-primcall-args prim args)
-    (apply (primitive-emitter prim) si env args)))
+    (apply (primitive-emitter prim) si env args)
+    (if tail? (emit "  ret"))))
 
-(define (emit-immediate expr)
-  (emit "  mov rax, ~s;  immediate" (immediate-rep expr)))
+(define (emit-immediate expr tail?)
+  (emit "  mov rax, ~s;  immediate" (immediate-rep expr))
+  (if tail? (emit "  ret")))
 
-(define (let-bindings expr)
-  (cadr expr))
-
-(define (let-body expr)
-  (caddr expr))
+(define let-bindings cadr)
+(define let-body caddr)
 
 (define (empty? x)
-  (and (list? x)
-       (= 0 (length x))))
+  (and (list? x) (= 0 (length x))))
 
-(define (first x)
-  (car x))
-
-(define (rest x)
-  (cdr x))
-
-(define (rhs x)
-  (cadr x))
-
-(define (lhs x)
-  (car x))
+(define first car)
+(define rest cdr)
+(define rhs cadr)
+(define lhs car)
 
 (define (emit-stack-save si)
-  (emit "  mov [rsp + ~s], rax;  save to stack" si))
+  (emit "  mov [rsp + ~s], rax; emit-stack-save" si))
 
 (define (next-stack-index si)
   (- si wordsize))
@@ -121,28 +108,16 @@
   (cons (cons var si) env))
 
 ; todo: implement let*
-(define (emit-let si env expr)
+(define (emit-let si env expr tail?)
   (define (process-let bindings si new-env)
     (cond
       [(empty? bindings)
-       (emit-expr si new-env (let-body expr))]
+      ; If a let expression is in tail position, then the body of the let is in
+      ; tail position.
+        (emit-expr si new-env (let-body expr) tail?)]
       [else
         (let ([b (first bindings)])
-          (emit-expr si env (rhs b))
-          (emit-stack-save si)
-          (process-let (rest bindings)
-                       (next-stack-index si)
-                       (extend-env (lhs b) si new-env)))]))
-  (process-let (let-bindings expr) si env))
-
-(define (emit-tail-let si env expr)
-  (define (process-let bindings si new-env)
-    (cond
-      [(empty? bindings)
-       (emit-tail-expr si new-env (let-body expr))]
-      [else
-        (let ([b (first bindings)])
-          (emit-expr si env (rhs b))
+          (emit-expr si env (rhs b) #f)
           (emit-stack-save si)
           (process-let (rest bindings)
                        (next-stack-index si)
@@ -151,48 +126,33 @@
 
 (define (lookup var alist)
   (let ((val (assoc var alist)))
+    (if (pair? val) (cdr val) #f)))
+
+(define (emit-stack-load si tail?)
+  (emit "  mov rax, [rsp + ~s]; load from stack" si)
+  (if tail? (emit "  ret")))
+
+(define (emit-variable-ref env expr tail?)
+  (let ([si (lookup expr env)])
     (cond
-      [(pair? val)  (cdr val)]
-      [else #f])))
+      [si  (emit-stack-load si tail?)]
+      [else (error 'emit-variable-ref "could not find variable" var)])))
 
-(define (emit-stack-load si)
-  (emit "  mov rax, [rsp + ~s]; load from stack" si))
+(define if-test cadr)
+(define if-conseq caddr)
+(define if-altern cadddr)
 
-(define (emit-variable-ref env expr)
-  (cond
-    [(lookup expr env) => emit-stack-load]
-    [else (error 'emit-variable-ref "could not find variable ref." var)]))
-
-(define (if-test expr)
-  (cadr expr))
-
-(define (if-conseq expr)
-  (caddr expr))
-
-(define (if-altern expr)
-  (cadddr expr))
-
-(define (emit-if si env expr)
+(define (emit-if si env expr tail?)
   (let ([alt-label (unique-label)]
         [end-label (unique-label)])
-    (emit-expr si env (if-test expr))
+    (emit-expr si env (if-test expr) #f) ; never in tail position
     (emit "  cmp al, ~s;  false?" bool-f)
     (emit "  je ~a;   jump to else" alt-label)
-    (emit-expr si env (if-conseq expr))
-    (emit "  jmp ~a;  jump to end" end-label)
+    (emit-expr si env (if-conseq expr) tail?)
+    (unless tail? (emit "  jmp ~a;  jump to end" end-label))
     (emit "~a:" alt-label)
-    (emit-expr si env (if-altern expr))
-    (emit "~a:" end-label)))
-
-(define (emit-tail-if si env expr)
-  (let ([alt-label (unique-label)]
-        [end-label (unique-label)])
-    (emit-expr si env (if-test expr))
-    (emit "  cmp al, ~s; false?" bool-f)
-    (emit "  je ~a;   jump to else" alt-label)
-    (emit-tail-expr si env (if-conseq expr))
-    (emit "~a:" alt-label)
-    (emit-tail-expr si env (if-altern expr))))
+    (emit-expr si env (if-altern expr) tail?)
+    (unless tail? (emit "~a:" end-label))))
 
 ; (and a b ...)
 ; (if a (if b #t #f) #f)
@@ -222,9 +182,10 @@
 
 (define (emit-scheme-entry expr env)
   (emit-function-header "L_scheme_entry" )
-  (emit-tail-expr (- wordsize) env expr))
+  (emit-expr (- wordsize) env expr #f)
+  (emit "  ret"))
 
-; for now letrec is only at the top of the stack
+; for now letrec is only at the top of the stack?
 (define (emit-letrec expr)
   (let* ([bindings (letrec-bindings expr)]
          [lvars (map lhs bindings)]
@@ -234,11 +195,8 @@
     (for-each (emit-lambda env) lambdas labels)
     (emit-scheme-entry (letrec-body expr) env)))
 
-(define (lambda-formals expr)
-  (cadr expr))
-
-(define (lambda-body expr)
-  (caddr expr))
+(define lambda-formals cadr)
+(define lambda-body caddr)
 
 (define (emit-lambda env)
   (lambda (expr label)
@@ -248,98 +206,72 @@
       (let f ([fmls fmls] [si (- wordsize)] [env env])
         (cond
           [(empty? fmls)  ; emit expression
-              (emit-tail-expr si env body)] ; the body of a procedure is in tail position
+              (emit-expr si env body 'tail-position)]
           [else  ; move stack index downwards to accomodate argument,
                  ; and add stack index to environment
             (f (rest fmls)
-               (- si wordsize)
+               (next-stack-index si)
                (extend-env (first fmls) si env))])))))
 
-(define (call-args expr)
-  (cdr expr))
-
 (define (emit-adjust-base si)
-  (if (>= 0 si)
-    (emit "  sub rsp, ~s; adjust base" (- si))
-    (emit "  add rsp, ~s; adjust base" si)))
+  (cond
+    [(> 0 si)  (emit "  sub rsp, ~s; adjust base" (- si))]
+    [(< 0 si)  (emit "  add rsp, ~s; adjust base" si)]))
 
-(define (call-target expr)
-  (car expr))
+(define call-target car)
+(define call-args cdr)
 
-(define (emit-call si label)
-  (emit "  call ~a" label))
+(define (emit-call label tail?)
+  (if tail?
+    (emit "  jmp ~a; tail call" label)
+    (emit "  call ~a" label)))
 
-(define (emit-app si env expr)
+(define (emit-app si env expr tail?)
   (define (emit-arguments si args)
     (unless (empty? args)
-      (emit-expr si env (first args))
+      (emit-expr si env (first args) #f)
       (emit-stack-save si)
-      (emit-arguments (- si wordsize) (rest args))))
-  (emit-arguments (- si wordsize) (call-args expr))
-  (emit-adjust-base (+ si wordsize))
-  (emit-call si (lookup (call-target expr) env))
-  (emit-adjust-base (- (+ si wordsize))))
-
-(define (emit-tail-call label)
-  (emit "  jmp ~a; tail call" label))
-
-; moves arguments on stack adjacent to rsp, discarding local variables.
-(define (emit-tail-app si env expr)
-  (define (emit-arguments si args)
-    (unless (empty? args)
-      (emit-expr si env (first args))
-      (emit-stack-save si)
-      (emit-arguments (- si wordsize) (rest args))))
+      (emit-arguments (next-stack-index si) (rest args))))
+  ; moves arguments on stack adjacent to rsp, overwriting any local variables.
   (define (emit-move offset si args)
     (unless (empty? args)
       (emit "  mov rax, [rsp + ~s]" si)
       (emit "  mov [rsp + ~s], rax; move arg ~s" (- si offset) (car args))
-      (emit-move offset (- si wordsize) (rest args))))
-  (emit-arguments si (call-args expr)) ; evaluates args
-  (if (< si (- wordsize)) (emit-move (- si (- wordsize)) si (call-args expr))) ;collapse frame
-  (emit-tail-call (lookup (call-target expr) env)))
+      (emit-move offset (next-stack-index si) (rest args))))
+  (if tail?
+    (begin
+      (emit-arguments si (call-args expr)) ; evaluates args
+      (if (< si (- wordsize)) ; if the stack index is below the return address
+        (emit-move (- si (- wordsize)) si (call-args expr))) ;collapse frame
+      (emit-call (lookup (call-target expr) env) 'tail-position))
+    (begin
+      (emit-arguments (- si wordsize) (call-args expr))
+      (emit-adjust-base (+ si wordsize))
+      (emit-call (lookup (call-target expr) env) #f)
+      (emit-adjust-base (- (+ si wordsize))))))
 
 (define (app? expr env)
-  (and (list? expr)
-       (not (null? expr))
-       (or (equal? (car expr) 'app)
-           (lookup (car expr) env))))
-
-(define (emit-expr si env expr)
   (cond
-    [(immediate? expr) (emit-immediate expr)]
-    [(variable? expr)  (emit-variable-ref env expr)] ; gets si from env
-    [(if? expr)        (emit-if si env expr)]
-    [(and? expr)       (emit-if si env (transform-and expr))]
-    [(or? expr)        (emit-if si env (transform-or expr))]
-    [(let? expr)       (emit-let si env expr)]
-    [(primcall? expr)  (emit-primcall si env expr)]
-    [(app? expr env)   (emit-app si env (if (equal? (car expr) 'app) (cdr expr) expr))] ; primitives shadow environment?
-    [else (error 'emit-expr "type not supported" expr)]))
+    [(list-starts-with-any? expr '(app)) #t]
+    [(lookup (car expr) env)       #t]
+    [else #f]))
 
-(define (emit-tail-expr si env expr)
+(define (chomp-app expr)
   (cond
-    [(immediate? expr) (emit-tail-immediate expr)]
-    [(variable? expr)  (emit-tail-variable-ref env expr)]
-    [(if? expr)        (emit-tail-if si env expr)]
-    [(and? expr)       (emit-tail-if si env (transform-and expr))]
-    [(or? expr)        (emit-tail-if si env (transform-or expr))]
-    [(let? expr)       (emit-tail-let si env expr)]
-    [(primcall? expr)  (emit-tail-primcall si env expr)]
-    [(app? expr env)   (emit-tail-app si env (if (equal? (car expr) 'app) (cdr expr) expr))] ; primitives shadow environment?
-    [else (error 'emit-tail-expr "error in expression")]))
+    [(list-starts-with-any? expr '(app))  (cdr expr)]
+    [else expr]))
 
-(define (emit-tail-immediate expr)
-  (emit-immediate expr)
-  (emit "  ret;  return from tail call"))
-
-(define (emit-tail-variable-ref env expr)
-  (emit-variable-ref env expr)
-  (emit "  ret;  return from tail call"))
-
-(define (emit-tail-primcall si env expr)
-  (emit-primcall si env expr)
-  (emit "  ret;  return from tail call"))
+(define (emit-expr si env expr tail?)
+  (cond
+    [(immediate? expr) (emit-immediate expr tail?)]
+    [(variable? expr)  (emit-variable-ref env expr tail?)] ; gets si from env
+    [(if? expr)        (emit-if si env expr tail?)]
+    [(and? expr)       (emit-if si env (transform-and expr) tail?)]
+    [(or? expr)        (emit-if si env (transform-or expr) tail?)]
+    [(let? expr)       (emit-let si env expr tail?)]
+    [(primcall? expr)  (emit-primcall si env expr tail?)]
+    [(app? expr env)   (emit-app si env (chomp-app expr) tail?)] ; primitives shadow environment?
+    [else (error 'emit-expr "error in expression" expr)]))
 
 (define (emit-program expr)
   (if (letrec? expr)
@@ -356,117 +288,67 @@
   (emit "global ~a" name)
   (emit "~a:" name))
 
-; The primitive fxadd1 takes one argument, which must evaluate to a fixnum, and
-; returns that value incremented by 1. The implemen- tation of fxadd1 should
-; first emit the code for evaluating the argument. Evaluating that code at
-; runtime would place the value of the argument at the return-value register
-; %eax. The value placed in %eax should therefore be incremented and the new
-; computed value should be placed back in %eax. Remember though that all the
-; fixnums in our system are shifted to the left by two. So, a fxadd1 instruction
-; translates to an instruction that increments %eax by 4.
-(define-primitive ($fxadd1 si env arg)
-  (emit-expr si env arg)
-  (emit "  add rax, ~s" (immediate-rep 1)))  ; add x, y   x ← x + y
-
 (define-primitive (fxadd1 si env arg)
-  (emit-expr si env arg)
+  (emit-expr si env arg #f)
   (emit "  add rax, ~s" (immediate-rep 1)))  ; add x, y   x ← x + y
-
-(define-primitive ($fxsub1 si env arg)
-  (emit-expr si env arg)
-  (emit "  sub rax, ~s" (immediate-rep 1)))
 
 (define-primitive (fxsub1 si env arg)
-  (emit-expr si env arg)
+  (emit-expr si env arg #f)
   (emit "  sub rax, ~s" (immediate-rep 1)))
 
-(define-primitive ($fixnum->char si env arg)
-  (emit-expr si env arg)                            ; mov rax, arg
+(define-primitive (fixnum->char si env arg)
+  (emit-expr si env arg #f)                            ; mov rax, arg
   (emit "  shl rax, ~s" (- charshift fxshift))  ; shift left 8 - 2 = 6 bits
   (emit "  or  rax, ~s" chartag))               ; or 00001111
 
-; The implementation of the primitive char->fixnum should evaluate its argument,
-; which must evaluate to a character, then convert the value to the appropriate
-; fixnum. Since we defined the tag for characters to be 00001111b and the tag
-; for fixnums to be 00b, it suffices to shift the character value to the right
-; by six bits to obtain the fixnum value. The primitive fixnum->char should
-; shift the fixnum value to the left, then tag the result with the character
-; tag. Tagging a value is performed using the instruction orl.
-(define-primitive ($char->fixnum si env arg)
-  (emit-expr si env arg)  ; mov rax, arg
+(define-primitive (char->fixnum si env arg)
+  (emit-expr si env arg #f)  ; mov rax, arg
   (emit "  shr rax, ~s" (- charshift fxshift))
   (emit "  and rax, ~s" (lognot fxmask)))
 
-; Implementing predicates such as fixnum? is not as simple. First, after the
-; argument to fixnum? is evaluated, the lower two bits of the result must be
-; extracted and compared to the fixnum tag 00b. If the comparison succeeds, we
-; return the true value, otherwise we return the false value. Extracting the
-; lower bits using the fixnum mask is done using the bitwise-and instructions
-; and/andl2. The result is compared with the fixnum tag using the cmp/cmpl
-; instruction. The Intel-386 architecture provides many instructions for
-; conditionally setting the lower half of a register by either a 1 or a 0
-; depedning on the relation of the objects involved in the comparison. One such
-; instruction is sete which sets the argument register to 1 if the two compared
-; numbers were equal and to 0 otherwise. A small glitch here is that the sete
-; instruction only sets a 16-bit register. To work around this problem, we use
-; the movzbl instruction that sign-extends the lower half of the register to the
-; upper half. Since both 0 and 1 have 0 as their sign bit, the result of the
-; extension is that the upper bits will be all zeros. Finally, the result of the
-; comparison is shifted to the left by an appropriate number of bits and or’ed
-; with the false value 00101111b to obtain either the false value or the true
-; value 01101111b.
 (define-primitive (fixnum? si env arg)
-  (emit-expr si env arg)
+  (emit-expr si env arg #f)
   (emit "  and al, ~s" fxmask)
   (emit "  cmp al, ~s" fxtag)
-  (emit "  sete al")  ; set equal: set to 1 otherwise 0 on condition (ZF=0)
+  (emit-true-using 'sete))
+
+(define (emit-true-using set-byte-on-condition)
+  (emit "  ~s al" set-byte-on-condition)  ; set equal: set to 1 otherwise 0 on condition (ZF=0)
   (emit "  movsx rax, al")
   (emit "  sal al, ~s" bool-bit)
   (emit "  or  al, ~s" bool-f))
-
-(define (emit-true-when-equal)
-  (emit "  sete al")  ; set equal: set to 1 otherwise 0 on condition (ZF=0)
-  (emit "  movsx rax, al")
-  (emit "  sal al, ~s" bool-bit)
-  (emit "  or  al, ~s" bool-f))
-
-(define-primitive ($fxzero? si env arg)
-  (emit-expr si env arg)
-  (emit "  cmp rax, 0")
-  (emit-true-when-equal))
 
 (define-primitive (fxzero? si env arg)
-  (emit-expr si env arg)
+  (emit-expr si env arg #f)
   (emit "  cmp rax, 0")
-  (emit-true-when-equal))
+  (emit-true-using 'sete))
 
 (define-primitive (null? si env arg)
-  (emit-expr si env arg)
+  (emit-expr si env arg #f)
   (emit "  cmp al, ~s" niltag)
-  (emit-true-when-equal))
+  (emit-true-using 'sete))
 
 (define-primitive (boolean? si env arg)
-  (emit-expr si env arg)
+  (emit-expr si env arg #f)
   (emit "  and rax, ~s" boolmask)
   (emit "  cmp rax, ~s" bool-f)
-  (emit-true-when-equal))
+  (emit-true-using 'sete))
 
 (define-primitive (char? si env arg)
-  (emit-expr si env arg)
+  (emit-expr si env arg #f)
   (emit "  and rax, ~s" charmask)
   (emit "  cmp rax, ~s" chartag)
-  (emit-true-when-equal))
+  (emit-true-using 'sete))
 
 ; The primitive not takes any kind of value and returns #t if the object is #f,
 ; otherwise it returns #f.
-;  (emit "  xor rax, ~s" #b01000000) ; not so simple
 (define-primitive (not si env arg)
-  (emit-expr si env arg)
+  (emit-expr si env arg #f)
   (emit "  cmp rax, ~s" bool-f)
-  (emit-true-when-equal))
+  (emit-true-using 'sete))
 
-(define-primitive ($fxlognot si env arg)
-  (emit-expr si env arg)
+(define-primitive (fxlognot si env arg)
+  (emit-expr si env arg #f)
   (emit "  shr rax, ~s" fxshift)
   (emit "  not rax")
   (emit "  shl rax, ~s" fxshift))
@@ -479,122 +361,56 @@
         L))))
 
 (define-primitive (fx+ si env arg1 arg2)
-  (emit-expr si env arg1)
+  (emit-expr si env arg1 #f)
   (emit "  mov [rsp + ~s], rax;  put on stack" si)
-  (emit-expr (- si wordsize) env arg2)
+  (emit-expr (- si wordsize) env arg2 #f)
   (emit "  add rax, [rsp + ~s];  add stack and rax" si))
 
-; Not sure why subtracting signed numbers don't need to be
-; right shifted (untagged) here.
-; Note the arguments go on the stack in reverse order
 (define-primitive (fx- si env arg1 arg2)
-  (emit-expr si env arg2)   ; rax <- arg1
-  (emit "  mov [rsp + ~s], rax" si) ; push?
-  (emit-expr (- si wordsize) env arg1)
+  (emit-expr si env arg2 #f)   ; rax <- arg1
+  (emit "  mov [rsp + ~s], rax" si)
+  (emit-expr (- si wordsize) env arg1 #f)
   (emit "  sub rax, [rsp + ~s]" si))
 
 (define-primitive (fx* si env arg1 arg2)
-   (emit-expr si env arg2)   ; eval arg and put in rax
-   (emit "  mov [rsp + ~s], rax" si)
-   (emit-expr (- si wordsize) env arg1) ; eval arg and put in rax
-   (emit "  mov [rsp + ~s], rax" (- si wordsize))
-   (emit "  mov eax, [rsp + ~s]" si)
-   (emit "  mov ebx, [rsp + ~s]" (- si wordsize))
-   (emit "  imul ebx") ; eax * ebx
-   (emit "  mov ebx, 4")
-   (emit "  idiv ebx")) ; eax / ebx
+  (emit-exprs-load si env arg1 arg2 'rax 'rbx)
+  (emit "  imul ebx") ; eax * ebx
+  (emit "  mov ebx, 4")
+  (emit "  idiv ebx")) ; eax / ebx
+
+(define (emit-exprs-load si env arg1 arg2 register1 register2)
+  (emit-expr si env arg1 #f)
+  (emit-stack-save si)
+  (emit-expr (next-stack-index si) env arg2 #f)
+  (emit-stack-save (next-stack-index si))
+  (emit "  mov ~s, [rsp + ~s]" register1 si) ; (emit-stack-load si)
+  (emit "  mov ~s, [rsp + ~s]" register2 (next-stack-index si))) ; (emit-stack-load (- si wordsize))
 
 (define-primitive (fxlogor si env arg1 arg2)
-   (emit-expr si env arg2)
-   (emit "  mov [rsp + ~s], rax" si)
-   (emit-expr (- si wordsize) env arg1)
-   (emit "  mov [rsp + ~s], rax" (- si wordsize))
-   (emit "  mov rax, [rsp + ~s]" si)
-   (emit "  mov rbx, [rsp + ~s]" (- si wordsize))
-   (emit "  or rax, rbx"))
+  (emit-exprs-load si env arg1 arg2 'rax 'rbx)
+  (emit "  or rax, rbx"))
 
 (define-primitive (fxlognot si env arg1)
-  (emit-expr si env arg1)
+  (emit-expr si env arg1 #f)
   (emit "  shr rax, ~s" fxshift)
   (emit "  not rax")
   (emit "  shl rax, ~s" fxshift))
 
 (define-primitive (fxlogand si env arg1 arg2)
-  (emit-expr si env arg2)
-  (emit "  mov [rsp + ~s], rax" si)
-  (emit-expr (- si wordsize) env arg1)
-  (emit "  mov [rsp + ~s], rax" (- si wordsize))
-  (emit "  mov rax, [rsp + ~s]" si)
-  (emit "  mov rbx, [rsp + ~s]" (- si wordsize))
+  (emit-exprs-load si env arg1 arg2 'rax 'rbx)
   (emit "  and rax, rbx"))
 
-(define-primitive (fx= si env arg1 arg2)
-  (emit-expr si env arg2)
-  (emit "  mov [rsp + ~s], rax" si)
-  (emit-expr (- si wordsize) env arg1)
-  (emit "  mov [rsp + ~s], rax" (- si wordsize))
-  (emit "  mov rax, [rsp + ~s]" si)
-  (emit "  mov rbx, [rsp + ~s]" (- si wordsize))
-  (emit "  cmp rax, rbx")
-  (emit-true-when-equal))
+(define-syntax define-binary-primitive
+  (syntax-rules ()
+                [(_ (prim-name operator-instruction))
+                  (define-primitive (prim-name si env arg1 arg2)
+                                    (emit-exprs-load si env arg1 arg2 'rax 'rbx)
+                                    (emit "  cmp rax, rbx" )
+                                    (emit-true-using operator-instruction))]))
 
-(define-primitive (fx< si env arg1 arg2)
-  (let ([true-label (unique-label)]
-        [end-label (unique-label)])
-  (emit-expr si env arg2)
-  (emit "  mov [rsp + ~s], rax" si)
-  (emit-expr (- si wordsize) env arg1)
-  (emit "  mov [rsp + ~s], rax" (- si wordsize))
-  (emit "  mov rbx, [rsp + ~s]" si)
-  (emit "  mov rax, [rsp + ~s]" (- si wordsize))
-  (emit "  cmp rax, rbx")
-  (emit "  setl al")
-  (emit "  movsx rax, al")
-  (emit "  sal al, ~s" bool-bit)
-  (emit "  or  al, ~s" bool-f)))
-
-(define-primitive (fx<= si env arg1 arg2)
-  (let ([true-label (unique-label)]
-        [end-label (unique-label)])
-  (emit-expr si env arg2)
-  (emit "  mov [rsp + ~s], rax" si)
-  (emit-expr (- si wordsize) env arg1)
-  (emit "  mov [rsp + ~s], rax" (- si wordsize))
-  (emit "  mov rbx, [rsp + ~s]" si)
-  (emit "  mov rax, [rsp + ~s]" (- si wordsize))
-  (emit "  cmp rax, rbx")
-  (emit "  setle al")
-  (emit "  movsx rax, al")
-  (emit "  sal al, ~s" bool-bit)
-  (emit "  or  al, ~s" bool-f)))
-
-(define-primitive (fx> si env arg1 arg2)
-  (let ([true-label (unique-label)]
-        [end-label (unique-label)])
-  (emit-expr si env arg2)
-  (emit "  mov [rsp + ~s], rax" si)
-  (emit-expr (- si wordsize) env arg1)
-  (emit "  mov [rsp + ~s], rax" (- si wordsize))
-  (emit "  mov rbx, [rsp + ~s]" si)
-  (emit "  mov rax, [rsp + ~s]" (- si wordsize))
-  (emit "  cmp rax, rbx")
-  (emit "  setg al")
-  (emit "  movsx rax, al")
-  (emit "  sal al, ~s" bool-bit)
-  (emit "  or  al, ~s" bool-f)))
-
-(define-primitive (fx>= si env arg1 arg2)
-  (let ([true-label (unique-label)]
-        [end-label (unique-label)])
-  (emit-expr si env arg2)
-  (emit "  mov [rsp + ~s], rax" si)
-  (emit-expr (- si wordsize) env arg1)
-  (emit "  mov [rsp + ~s], rax" (- si wordsize))
-  (emit "  mov rbx, [rsp + ~s]" si)
-  (emit "  mov rax, [rsp + ~s]" (- si wordsize))
-  (emit "  cmp rax, rbx")
-  (emit "  setge al")
-  (emit "  movsx rax, al")
-  (emit "  sal al, ~s" bool-bit)
-  (emit "  or  al, ~s" bool-f)))
+(define-binary-primitive (fx= 'sete))
+(define-binary-primitive (fx< 'setl))
+(define-binary-primitive (fx<= 'setle))
+(define-binary-primitive (fx> 'setg))
+(define-binary-primitive (fx>= 'setge))
 
