@@ -40,4 +40,7 @@
   [(letrec ([e (lambda (x) (if (fxzero? x) #t (app o (fxsub1 x))))]
             [o (lambda (x) (if (fxzero? x) #f (app e (fxsub1 x))))])
      (app e 5000000)) => "#t\n"]
+  [(letrec ((fib (lambda (n)
+                   (if (or (fx= 1 n) (fx= 2 n)) 1
+                       (fx+ (fib (fx- n 1)) (fib (fx- n 2))))))) (fib 20)) => "6765\n"]
 )
