@@ -23,7 +23,7 @@ ifeq ($(PLATFORM),Darwin)
   ENTRY=_scheme_entry
 endif
 
-CFLAGS= -g -fomit-frame-pointer -Wall -pedantic
+CFLAGS= -m64 -g -fomit-frame-pointer -Wall -pedantic
 
 build: clean stst
 

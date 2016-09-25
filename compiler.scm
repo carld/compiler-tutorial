@@ -7,6 +7,7 @@
 (load "tests-1.6-req.scm")
 (load "tests-1.7-req.scm")
 (load "tests-1.8-req.scm")
+(load "tests-1.9-req.scm")
 
 (define fxshift    2)
 (define fxmask  #x03)
@@ -21,6 +22,15 @@
 (define chartag   #b00001111) ; 0x0F
 (define charshift  8)
 (define niltag    #b00111111)
+
+(define objshift  3)
+(define objmask   #b00000111)
+(define pairtag   #b00000001)
+(define clotag    #b00000010)
+(define symtag    #b00000011)
+(define vectag    #b00000101)
+(define strtag    #b00000110)
+
 (define fixnum-bits (- (* wordsize 8) fxshift))
 (define fxlower (- (expt 2 (- fixnum-bits 1))))
 (define fxupper (sub1 (expt 2 (- fixnum-bits 1))))
@@ -49,6 +59,15 @@
                    (putprop 'prim-name '*emitter*
                             (lambda (si env arg* ...) b b* ...)))]))
 
+(define-syntax define-variadic-primitive
+  (syntax-rules ()
+                [(_ (prim-name) b b* ...)
+                 (begin
+                   (putprop 'prim-name '*is-prim* #t)
+                   (putprop 'prim-name '*arg-count* #f)
+                   (putprop 'prim-name '*emitter*
+                            b b* ...))]))
+
 (define (primitive? x)
   (and (symbol? x) (getprop x '*is-prim*)))
 
@@ -67,6 +86,7 @@
 (define-list-head-predicate (or? 'or))
 (define-list-head-predicate (let? 'let 'let*))
 (define-list-head-predicate (letrec? 'letrec ))
+(define-list-head-predicate (begin? 'begin))
 
 (define (primitive-emitter x)
   (or (getprop x '*emitter*) (error 'primitive-emitter "missing emitter for" x)))
@@ -88,7 +108,7 @@
   (if tail? (emit "  ret")))
 
 (define let-bindings cadr)
-(define let-body caddr)
+(define let-body cddr)
 
 (define (empty? x)
   (and (list? x) (= 0 (length x))))
@@ -114,10 +134,10 @@
       [(empty? bindings)
       ; If a let expression is in tail position, then the body of the let is in
       ; tail position.
-        (emit-expr si new-env (let-body expr) tail?)]
+          (emit-expr si new-env (cons 'begin (let-body expr))  tail?)]
       [else
         (let ([b (first bindings)])
-          (emit-expr si env (rhs b) #f)
+          (emit-expr si (if (equal? (car expr) 'let*) new-env env) (rhs b) #f)
           (emit-stack-save si)
           (process-let (rest bindings)
                        (next-stack-index si)
@@ -193,7 +213,7 @@
          [labels (unique-labels lvars)]
          [env (make-initial-env lvars labels)])
     (for-each (emit-lambda env) lambdas labels)
-    (emit-scheme-entry (letrec-body expr) env)))
+    (emit-scheme-entry (cons 'begin (letrec-body expr)) env)))
 
 (define lambda-formals cadr)
 (define lambda-body caddr)
@@ -261,6 +281,10 @@
     [(list-starts-with-any? expr '(app))  (cdr expr)]
     [else expr]))
 
+(define (emit-begin si env expr tail?)
+  (for-each (lambda(e)
+              (emit-expr si env e tail?)) (cdr expr)))
+
 (define (emit-expr si env expr tail?)
   (cond
     [(immediate? expr) (emit-immediate expr tail?)]
@@ -269,6 +293,7 @@
     [(and? expr)       (emit-if si env (transform-and expr) tail?)]
     [(or? expr)        (emit-if si env (transform-or expr) tail?)]
     [(let? expr)       (emit-let si env expr tail?)]
+    [(begin? expr)     (emit-begin si env expr tail?)]
     [(primcall? expr)  (emit-primcall si env expr tail?)]
     [(app? expr env)   (emit-app si env (chomp-app expr) tail?)] ; primitives shadow environment?
     [else (error 'emit-expr "error in expression" expr)]))
@@ -277,11 +302,27 @@
   (if (letrec? expr)
     (emit-letrec expr)
     (emit-scheme-entry expr '()))
-  (emit-function-header (getenv "ENTRY")) ;"scheme_entry")
-  (emit "  mov rcx, rsp")  ; save the C stack pointer
-  (emit "  mov rsp, rdi") ; allocated stack base argument, calling convention puts it in rdi ...
+  (emit-function-header (or (getenv "ENTRY") "_scheme_entry")) ;"scheme_entry")
+  ; parameters in rdi, rsi, rdx, rcx, r8, r9, then stack right to left
+  ; preserve registers rbx, rsp, rbp, r12, r13, r14, r15
+  (emit "  mov rcx, rdi; store context pointer in rdx") ; allocated context argument
+  (emit "  mov [rcx + 8], rbx")
+  (emit "  mov [rcx + 48], rsp")
+  (emit "  mov [rcx + 56], rbp")
+  (emit "  mov [rcx + 96], r12")
+  (emit "  mov [rcx + 104], r13")
+  (emit "  mov [rcx + 112], r14")
+  (emit "  mov [rcx + 120], r15")
+  (emit "  mov rsp, rsi") ; allocated stack base argument, calling convention puts it in rdi ...
+  (emit "  mov rbp, rdx") ; allocated heap base argument, 
   (emit "  call L_scheme_entry")  ; push rip to rsp and jmp
-  (emit "  mov rsp, rcx")  ; restore the C stack pointer
+  (emit "  mov rbx, [rcx + 8]")
+  (emit "  mov rsp, [rcx + 48]")
+  (emit "  mov rbp, [rcx + 56]")
+  (emit "  mov r12, [rcx + 96]")
+  (emit "  mov r13, [rcx + 104]")
+  (emit "  mov r14, [rcx + 112]")
+  (emit "  mov r15, [rcx + 120]")
   (emit "  ret")) ; pop rsp and jump
 
 (define (emit-function-header name)
@@ -311,6 +352,35 @@
   (emit "  and al, ~s" fxmask)
   (emit "  cmp al, ~s" fxtag)
   (emit-true-using 'sete))
+
+(define-primitive (pair? si env arg)
+  (emit-expr si env arg #f)
+  (emit "  and rax, ~s" objmask) ; mask off bits above #b111
+  (emit "  cmp rax, ~s" pairtag)
+  (emit-true-using 'sete))
+
+(define-primitive (car si env arg)
+  (emit "  mov rax, [ rax - 1 ]; car"))
+
+(define-primitive (cdr si env arg)
+  (emit "  mov rax, [ rax + 7 ]; cdr"))
+
+(define-primitive (set-car! si env arg1 arg2)
+  (emit-exprs-load si env arg1 arg2 'rax 'rbx)
+  (emit "  mov [ rax - 1 ], rbx"))  ; untag (pairtag is 1), and set car
+
+(define-primitive (set-cdr! si env arg1 arg2)
+  (emit-exprs-load si env arg1 arg2 'rax 'rbx)
+  (emit "  mov [ rax + 7 ], rbx"))  ; untag and offset, and set cdr
+
+(define-primitive (cons si env arg1 arg2)
+  (emit-expr si env arg1 #f)
+  (emit "  mov [ rbp + 0 ], rax")
+  (emit-expr si env arg2 #f)
+  (emit "  mov [ rbp + 8 ], rax")
+  (emit "  mov rax, rbp")
+  (emit "  or  rax, ~s" pairtag)
+  (emit "  add rbp, 16"))
 
 (define (emit-true-using set-byte-on-condition)
   (emit "  ~s al" set-byte-on-condition)  ; set equal: set to 1 otherwise 0 on condition (ZF=0)
@@ -413,4 +483,126 @@
 (define-binary-primitive (fx<= 'setle))
 (define-binary-primitive (fx> 'setg))
 (define-binary-primitive (fx>= 'setge))
+(define-binary-primitive (eq? 'sete))
+(define-binary-primitive (char= 'sete))
+
+(define-variadic-primitive (make-vector)
+  (case-lambda
+    [(si env len) (apply (primitive-emitter 'make-vector) si env (list len #f))]
+    [(si env len val)
+        (let ([label (unique-label)])
+          (emit-expr si env len #f)
+          (emit "  sar rax, ~s" fxshift) ; untag length
+          (emit "  sal rax, 3") ; multiply by 8
+          (emit "  mov [ rbp ], rax")   ; set vector length
+          (emit-expr si env val #f)
+          (emit "  mov rbx, rax") ;
+          (emit "  mov rdi, 8; offset")
+          (emit "~a:" label)
+          (emit "  mov [ rbp + rdi ], rbx")
+          (emit "  add rdi, 8")
+          (emit "  cmp rdi, [ rbp ]")
+          (emit "  jle ~a" label)
+          (emit "  mov rax, rbp")
+          (emit "  or  rax, ~s" vectag)
+          (emit "  add rbp, rdi"))]))
+
+(define-variadic-primitive (make-string)
+  (case-lambda
+    [(si env len) (apply (primitive-emitter 'make-string) si env (list len #f))]
+    [(si env len val)
+        (let ([label (unique-label)])
+          (emit-expr si env len #f)
+          (emit "  sar rax, ~s" fxshift) ; untag length
+          (emit "  sal rax, 3") ; multiply by 8
+          (emit "  mov [ rbp ], rax")   ; set length
+          (emit-expr si env val #f)
+          (emit "  mov rbx, rax") ;
+          (emit "  mov rdi, 8; offset")
+          (emit "~a:" label)
+          (emit "  mov [ rbp + rdi ], rbx")
+          (emit "  add rdi, 8")
+          (emit "  cmp rdi, [ rbp ]")
+          (emit "  jle ~a" label)
+          (emit "  mov rax, rbp")
+          (emit "  or  rax, ~s" strtag)
+          (emit "  add rbp, rdi"))]))
+
+(define-primitive (vector? si env arg)
+  (emit-expr si env arg #f)
+  (emit "  and al, ~s" 7) ; mask off bits above #b111
+  (emit "  cmp al, ~s" vectag)
+  (emit-true-using 'sete))
+
+(define-primitive (string? si env arg)
+  (emit-expr si env arg #f)
+  (emit "  and al, ~s" 7) ; mask off bits above #b111
+  (emit "  cmp al, ~s" strtag)
+  (emit-true-using 'sete))
+
+(define-primitive (vector-length si env arg)
+  (emit-expr si env arg #f)
+  ; assuming rax is actually a vector
+  (emit "  sar rax, ~s" objshift) ;untag
+  (emit "  sal rax, ~s" objshift) ;untag
+  (emit "  mov rax, [rax]")
+  (emit "  sar rax, 3") ; divide by 8
+  (emit "  sal rax, ~s" fxshift)
+  (emit "  or  rax, ~s" fxtag))
+
+(define-primitive (string-length si env arg)
+  (emit-expr si env arg #f)
+  ; assuming rax is actually a string
+  (emit "  sar rax, ~s" objshift) ;untag
+  (emit "  sal rax, ~s" objshift) ;untag
+  (emit "  mov rax, [rax]")
+  (emit "  sar rax, 3") ; divide by 8
+  (emit "  sal rax, ~s" fxshift)
+  (emit "  or  rax, ~s" fxtag))
+
+(define-primitive (vector-set! si env v index value)
+  (emit ";;; before vector-set!")
+  (emit-expr si env value #f)
+  (emit "  mov rdx, rax")
+  (emit-expr si env index #f)
+  (emit "  mov rbx, rax")
+  (emit "  sar rbx, ~s" fxshift); untag index
+  (emit "  sal rbx, 3"); multiply index by 8
+  (emit "  add rbx, 8"); offset index past length
+  (emit-expr si env v #f)
+  (emit "  sar rax, ~s" objshift) ;untag vector
+  (emit "  sal rax, ~s" objshift) ;untag vector
+  (emit "  mov [ rax + rbx ], rdx")
+  (emit ";;; vector-set!"))
+
+(define-primitive (string-set! si env v index value)
+  (emit-expr si env value #f)
+  (emit "  mov rdx, rax")
+  (emit-expr si env index #f)
+  (emit "  mov rbx, rax")
+  (emit "  sar rbx, ~s" fxshift); untag index
+  (emit "  sal rbx, 3"); multiply index by 8
+  (emit "  add rbx, 8"); offset index past length
+  (emit-expr si env v #f)
+  (emit "  sar rax, ~s" objshift) ;untag
+  (emit "  sal rax, ~s" objshift) ;untag
+  (emit "  mov [ rax + rbx ], rdx"))
+
+(define-primitive (vector-ref si env v index)
+  (emit-exprs-load si env v index 'rbx 'rdx)
+  (emit "  sar rbx, ~s" objshift) ;untag vector
+  (emit "  sal rbx, ~s" objshift) ;untag vector
+  (emit "  sar rdx, ~s" fxshift); untag index
+  (emit "  sal rdx, 3"); multiply index by 8
+  (emit "  add rdx, 8"); offset index past length
+  (emit "  mov rax, [ rbx + rdx ]"))
+
+(define-primitive (string-ref si env v index)
+  (emit-exprs-load si env v index 'rbx 'rdx)
+  (emit "  sar rbx, ~s" objshift) ;untag
+  (emit "  sal rbx, ~s" objshift) ;untag
+  (emit "  sar rdx, ~s" fxshift); untag index
+  (emit "  sal rdx, 3"); multiply index by 8
+  (emit "  add rdx, 8"); offset index past length
+  (emit "  mov rax, [ rbx + rdx ]"))
 
