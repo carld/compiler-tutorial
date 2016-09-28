@@ -1,3 +1,5 @@
+; Scheme compiler for x86_64
+
 (load "tests-driver.scm")
 (load "tests-1.1-req.scm")
 (load "tests-1.2-req.scm")
@@ -9,6 +11,7 @@
 (load "tests-1.8-req.scm")
 (load "tests-1.9-req.scm")
 
+; The lower bits of a 64 bit machine word contains a Scheme type tag
 (define fxshift    2)
 (define fxmask  #x03)
 (define fxtag   #x00)
@@ -22,7 +25,6 @@
 (define chartag   #b00001111) ; 0x0F
 (define charshift  8)
 (define niltag    #b00111111)
-
 (define objshift  3)
 (define objmask   #b00000111)
 (define pairtag   #b00000001)
@@ -41,6 +43,7 @@
 (define (variable? x)
   (symbol? x))
 
+; Encode an immediate value in a machine word with a type tag
 (define (immediate-rep x)
   (cond
     [(fixnum? x) (ash x fxshift)]
@@ -49,6 +52,8 @@
     [(null? x)   niltag]
     [else (errorf 'immediate-rep "no immediate representation for ~s" x)]))
 
+; Declare a global symbol with properties describing it as a code generator
+; for a primitive operation.
 (define-syntax define-primitive
   (syntax-rules ()
                 [(_ (prim-name si env arg* ...) b b* ...)
@@ -59,6 +64,8 @@
                    (putprop 'prim-name '*emitter*
                             (lambda (si env arg* ...) b b* ...)))]))
 
+; This macro is the same as define-primitive, apart from the *emitter* which
+; has no (lambda ... ), this was to allow declaring a lambda-case *emitter*.
 (define-syntax define-variadic-primitive
   (syntax-rules ()
                 [(_ (prim-name) b b* ...)
@@ -74,6 +81,7 @@
 (define (list-starts-with-any? expr val)
   (and (list? expr) (< 0 (length expr)) (memq (car expr) val)))
 
+; Defines procedures that check for a specific symbol at the head of the list.
 (define-syntax define-list-head-predicate
   (syntax-rules ()
                 [(_ (predicate sym* ...))
@@ -97,12 +105,15 @@
 (define (check-primcall-args prim args)
   (equal? (length args) (getprop prim '*arg-count*)))
 
+; Emits assembly for a primitive.
 (define (emit-primcall si env expr tail?)
   (let ([prim (car expr)] [args (cdr expr)])
     (check-primcall-args prim args)
     (apply (primitive-emitter prim) si env args)
     (if tail? (emit "  ret"))))
 
+; Generate assembly that places an immediate value in the return register, rax.
+; If this code is in tail position, return to the caller.
 (define (emit-immediate expr tail?)
   (emit "  mov rax, ~s;  immediate" (immediate-rep expr))
   (if tail? (emit "  ret")))
@@ -118,16 +129,21 @@
 (define rhs cadr)
 (define lhs car)
 
+; Store the current expression held in rax, on the stack at the given index.
 (define (emit-stack-save si)
   (emit "  mov [rsp + ~s], rax; emit-stack-save" si))
 
+; Get the next stack index, a machine word (8 bytes) below the stack index argument.
 (define (next-stack-index si)
   (- si wordsize))
 
+; Push the variable name and it's stack index onto the environment.
 (define (extend-env var si env)
   (cons (cons var si) env))
 
-; todo: implement let*
+; Emit a let or let* expression.
+; This emits all of the bindings first, storing them on the stack before
+; emitting the let body.
 (define (emit-let si env expr tail?)
   (define (process-let bindings si new-env)
     (cond
@@ -136,6 +152,7 @@
       ; tail position.
           (emit-expr si new-env (cons 'begin (let-body expr))  tail?)]
       [else
+        ; Emit assembly for evaluating the next let binding
         (let ([b (first bindings)])
           (emit-expr si (if (equal? (car expr) 'let*) new-env env) (rhs b) #f)
           (emit-stack-save si)
@@ -144,14 +161,18 @@
                        (extend-env (lhs b) si new-env)))]))
   (process-let (let-bindings expr) si env))
 
+; Returns the value from an association list, or false.
 (define (lookup var alist)
   (let ((val (assoc var alist)))
     (if (pair? val) (cdr val) #f)))
 
+; Emit assembly for loading value from stack into rax register.
 (define (emit-stack-load si tail?)
   (emit "  mov rax, [rsp + ~s]; load from stack" si)
   (if tail? (emit "  ret")))
 
+; Look up the expression in the environment and emit code that loads the
+; value from the stack using the index.
 (define (emit-variable-ref env expr tail?)
   (let ([si (lookup expr env)])
     (cond
@@ -162,6 +183,7 @@
 (define if-conseq caddr)
 (define if-altern cadddr)
 
+; Generate the assembly code for an if expression.
 (define (emit-if si env expr tail?)
   (let ([alt-label (unique-label)]
         [end-label (unique-label)])
@@ -174,6 +196,7 @@
     (emit-expr si env (if-altern expr) tail?)
     (unless tail? (emit "~a:" end-label))))
 
+; Transform an and expression into a nested if expression.
 ; (and a b ...)
 ; (if a (if b #t #f) #f)
 (define (transform-and expr)
@@ -182,6 +205,7 @@
       #t
       `(if ,(car i) ,(conseq (cdr i)) #f))))
 
+; Transform an or expression into a nested if expression.
 ; (or a b ...)
 ; (if a #t (if b #t #f) #f)
 (define (transform-or expr)
@@ -190,6 +214,7 @@
       #f
       `(if ,(car i) #t ,(altern (cdr i))))))
 
+; Generate a unique label for each var in the list
 (define (unique-labels lvars)
   (map (lambda (lvar)
          (format "~a_~a" (unique-label) lvar)) lvars))
@@ -197,14 +222,17 @@
 (define letrec-bindings let-bindings)
 (define letrec-body let-body)
 
+; Create an initial association list
 (define (make-initial-env lvars labels)
   (map cons lvars labels))
 
+; Generate the assembly code prelude for the compiled scheme expression.
 (define (emit-scheme-entry expr env)
   (emit-function-header "L_scheme_entry" )
   (emit-expr (- wordsize) env expr #f)
   (emit "  ret"))
 
+; Emit a letrec expression
 ; for now letrec is only at the top of the stack?
 (define (emit-letrec expr)
   (let* ([bindings (letrec-bindings expr)]
@@ -218,6 +246,8 @@
 (define lambda-formals cadr)
 (define lambda-body caddr)
 
+; Emit code that evaluates arguments passed to a lambda and then emits code
+; that evaluates the lambda body.
 (define (emit-lambda env)
   (lambda (expr label)
     (emit-function-header label)
@@ -233,6 +263,8 @@
                (next-stack-index si)
                (extend-env (first fmls) si env))])))))
 
+; Emit code that adds (or subtracts) the size of a machine word to or from the
+; stack index.
 (define (emit-adjust-base si)
   (cond
     [(> 0 si)  (emit "  sub rsp, ~s; adjust base" (- si))]
@@ -241,11 +273,13 @@
 (define call-target car)
 (define call-args cdr)
 
+; Emit assembly for a procedure call
 (define (emit-call label tail?)
   (if tail?
     (emit "  jmp ~a; tail call" label)
     (emit "  call ~a" label)))
 
+; Emit evaluation of arguments and call a procedure
 (define (emit-app si env expr tail?)
   (define (emit-arguments si args)
     (unless (empty? args)
@@ -270,21 +304,27 @@
       (emit-call (lookup (call-target expr) env) #f)
       (emit-adjust-base (- (+ si wordsize))))))
 
+; Determine apply, either when the expression starts with app, or the 
+; expression starts with a symbol that is in the environment.
+; Note :- revisit this when implementing closures?
 (define (app? expr env)
   (cond
     [(list-starts-with-any? expr '(app)) #t]
     [(lookup (car expr) env)       #t]
     [else #f]))
 
+; Remove the app symbol from the head of a list.
 (define (chomp-app expr)
   (cond
     [(list-starts-with-any? expr '(app))  (cdr expr)]
     [else expr]))
 
+; Loop through each expression following begin and emit the code for each.
 (define (emit-begin si env expr tail?)
   (for-each (lambda(e)
               (emit-expr si env e tail?)) (cdr expr)))
 
+; Emit assembly code based on the form of the given expression.
 (define (emit-expr si env expr tail?)
   (cond
     [(immediate? expr) (emit-immediate expr tail?)]
@@ -298,6 +338,8 @@
     [(app? expr env)   (emit-app si env (chomp-app expr) tail?)] ; primitives shadow environment?
     [else (error 'emit-expr "error in expression" expr)]))
 
+; Emit the entry point for the compiled scheme code.
+; The emitted code preserves registers according to the System V ABI.
 (define (emit-program expr)
   (if (letrec? expr)
     (emit-letrec expr)
@@ -325,54 +367,59 @@
   (emit "  mov r15, [rcx + 120]")
   (emit "  ret")) ; pop rsp and jump
 
+; Export and declare a label in the emitted assembly code.
 (define (emit-function-header name)
   (emit "global ~a" name)
   (emit "~a:" name))
 
-(define-primitive (fxadd1 si env arg)
-  (emit-expr si env arg #f)
+; Defines procedures that emit primitives of one argument.
+(define-syntax define-primitive-unary
+  (syntax-rules ()
+               [(_ (name) b ...)
+                (define-primitive (name si env arg)
+                  (emit-expr si env arg #f)
+                  b ... )]))
+
+; Add one to the fixnum value held in the rax register.
+(define-primitive-unary (fxadd1)
   (emit "  add rax, ~s" (immediate-rep 1)))  ; add x, y   x ← x + y
 
-(define-primitive (fxsub1 si env arg)
-  (emit-expr si env arg #f)
+; Subtract one from the fixnum value held in the rax register.
+(define-primitive-unary (fxsub1)
   (emit "  sub rax, ~s" (immediate-rep 1)))
 
-(define-primitive (fixnum->char si env arg)
-  (emit-expr si env arg #f)                            ; mov rax, arg
+; Convert the fixnum to a tagged character.
+(define-primitive-unary (fixnum->char)
   (emit "  shl rax, ~s" (- charshift fxshift))  ; shift left 8 - 2 = 6 bits
   (emit "  or  rax, ~s" chartag))               ; or 00001111
 
-(define-primitive (char->fixnum si env arg)
-  (emit-expr si env arg #f)  ; mov rax, arg
+; Convert the character to a tagged fixnum.
+(define-primitive-unary (char->fixnum)
   (emit "  shr rax, ~s" (- charshift fxshift))
   (emit "  and rax, ~s" (lognot fxmask)))
 
-(define-primitive (fixnum? si env arg)
-  (emit-expr si env arg #f)
-  (emit "  and al, ~s" fxmask)
-  (emit "  cmp al, ~s" fxtag)
-  (emit-true-using 'sete))
-
-(define-primitive (pair? si env arg)
-  (emit-expr si env arg #f)
-  (emit "  and rax, ~s" objmask) ; mask off bits above #b111
-  (emit "  cmp rax, ~s" pairtag)
-  (emit-true-using 'sete))
-
+; Pairs are tagged using the first bit, 0x01,
+; subtracting one, results in a pointer to the car, implicitly untagging.
 (define-primitive (car si env arg)
   (emit "  mov rax, [ rax - 1 ]; car"))
 
+; Pairs are tagged using the first bit, 0x01,
+; adding 7 results in a pointer to the cdr, implicity untagging.
 (define-primitive (cdr si env arg)
   (emit "  mov rax, [ rax + 7 ]; cdr"))
 
+; Sets the car of a pair.
 (define-primitive (set-car! si env arg1 arg2)
   (emit-exprs-load si env arg1 arg2 'rax 'rbx)
   (emit "  mov [ rax - 1 ], rbx"))  ; untag (pairtag is 1), and set car
 
+; Sets the cdr of a pair.
 (define-primitive (set-cdr! si env arg1 arg2)
   (emit-exprs-load si env arg1 arg2 'rax 'rbx)
   (emit "  mov [ rax + 7 ], rbx"))  ; untag and offset, and set cdr
 
+; Emits code that will allocate a new pair on the heap,
+; and move the heap pointer, stored in register rbp.
 (define-primitive (cons si env arg1 arg2)
   (emit-expr si env arg1 #f)
   (emit "  mov [ rbp + 0 ], rax")
@@ -382,33 +429,36 @@
   (emit "  or  rax, ~s" pairtag)
   (emit "  add rbp, 16"))
 
+; Emits code that will set the al (low 8 bits of rax) register to 1 based on
+; the given operator argument and the flags state after a cmp
 (define (emit-true-using set-byte-on-condition)
   (emit "  ~s al" set-byte-on-condition)  ; set equal: set to 1 otherwise 0 on condition (ZF=0)
   (emit "  movsx rax, al")
   (emit "  sal al, ~s" bool-bit)
   (emit "  or  al, ~s" bool-f))
 
-(define-primitive (fxzero? si env arg)
-  (emit-expr si env arg #f)
-  (emit "  cmp rax, 0")
-  (emit-true-using 'sete))
+; Defines a procedure that determines whether it's argument is of a specific type
+; and leaves true in the rax register if so.
+(define-syntax define-primitive-predicate
+  (syntax-rules ()
+    [(_ (name tag-or-value) b ...)
+     (define-primitive (name si env arg)
+        (emit-expr si env arg #f)
+        b ...
+        (emit "  cmp rax, ~s" tag-or-value)
+        (emit-true-using 'sete))]
+    [(_ (name tag-or-value mask))
+     (define-primitive-predicate (name tag-or-value)
+        (emit "  and rax, ~s" mask))]))
 
-(define-primitive (null? si env arg)
-  (emit-expr si env arg #f)
-  (emit "  cmp al, ~s" niltag)
-  (emit-true-using 'sete))
-
-(define-primitive (boolean? si env arg)
-  (emit-expr si env arg #f)
-  (emit "  and rax, ~s" boolmask)
-  (emit "  cmp rax, ~s" bool-f)
-  (emit-true-using 'sete))
-
-(define-primitive (char? si env arg)
-  (emit-expr si env arg #f)
-  (emit "  and rax, ~s" charmask)
-  (emit "  cmp rax, ~s" chartag)
-  (emit-true-using 'sete))
+(define-primitive-predicate (fxzero? 0))
+(define-primitive-predicate (fixnum? fxtag fxmask))
+(define-primitive-predicate (pair? pairtag objmask))
+(define-primitive-predicate (null? niltag))
+(define-primitive-predicate (boolean? bool-f boolmask))
+(define-primitive-predicate (char? chartag charmask))
+(define-primitive-predicate (vector? vectag objmask))
+(define-primitive-predicate (string? strtag objmask))
 
 ; The primitive not takes any kind of value and returns #t if the object is #f,
 ; otherwise it returns #f.
@@ -417,12 +467,7 @@
   (emit "  cmp rax, ~s" bool-f)
   (emit-true-using 'sete))
 
-(define-primitive (fxlognot si env arg)
-  (emit-expr si env arg #f)
-  (emit "  shr rax, ~s" fxshift)
-  (emit "  not rax")
-  (emit "  shl rax, ~s" fxshift))
-
+; Returns a string containing a unique label and increments an internal counter.
 (define unique-label
   (let ([count 0])
     (lambda ()
@@ -430,24 +475,31 @@
         (set! count (add1 count))
         L))))
 
+; Emits code that adds it's two fixnum expressions and leaves the result in 
+; the rax register.
 (define-primitive (fx+ si env arg1 arg2)
   (emit-expr si env arg1 #f)
   (emit "  mov [rsp + ~s], rax;  put on stack" si)
-  (emit-expr (- si wordsize) env arg2 #f)
+  (emit-expr (next-stack-index si) env arg2 #f)
   (emit "  add rax, [rsp + ~s];  add stack and rax" si))
 
+; Emits code that adds two fixnums and puts the result in the rax register.
 (define-primitive (fx- si env arg1 arg2)
   (emit-expr si env arg2 #f)   ; rax <- arg1
   (emit "  mov [rsp + ~s], rax" si)
-  (emit-expr (- si wordsize) env arg1 #f)
+  (emit-expr (next-stack-index si) env arg1 #f)
   (emit "  sub rax, [rsp + ~s]" si))
 
+; Emits code that multiplies two fixnums and puts the result in the rax
+; register.
 (define-primitive (fx* si env arg1 arg2)
   (emit-exprs-load si env arg1 arg2 'rax 'rbx)
   (emit "  imul ebx") ; eax * ebx
   (emit "  mov ebx, 4")
   (emit "  idiv ebx")) ; eax / ebx
 
+; Emits code that evaluates two expressions, saves them to the stack from the
+; given stack index, and also stores the results in the two register arguments.
 (define (emit-exprs-load si env arg1 arg2 register1 register2)
   (emit-expr si env arg1 #f)
   (emit-stack-save si)
@@ -456,21 +508,27 @@
   (emit "  mov ~s, [rsp + ~s]" register1 si) ; (emit-stack-load si)
   (emit "  mov ~s, [rsp + ~s]" register2 (next-stack-index si))) ; (emit-stack-load (- si wordsize))
 
+; Emits code that performs a logical or on it's two arguments.
 (define-primitive (fxlogor si env arg1 arg2)
   (emit-exprs-load si env arg1 arg2 'rax 'rbx)
   (emit "  or rax, rbx"))
 
-(define-primitive (fxlognot si env arg1)
-  (emit-expr si env arg1 #f)
+; Emits code that performs a logical not on it's fixnum argument and leaves 
+; the result in the rax register.
+(define-primitive-unary (fxlognot)
   (emit "  shr rax, ~s" fxshift)
   (emit "  not rax")
   (emit "  shl rax, ~s" fxshift))
 
+; Emits code that does a logical and on it's fixnum arguments and leaves the
+; result in the rax register.
 (define-primitive (fxlogand si env arg1 arg2)
   (emit-exprs-load si env arg1 arg2 'rax 'rbx)
   (emit "  and rax, rbx"))
 
-(define-syntax define-binary-primitive
+; Defines a procedure that will evaluate it's two arguments using the provided
+; comparison operator.
+(define-syntax define-primitive-compare
   (syntax-rules ()
                 [(_ (prim-name operator-instruction))
                   (define-primitive (prim-name si env arg1 arg2)
@@ -478,13 +536,13 @@
                                     (emit "  cmp rax, rbx" )
                                     (emit-true-using operator-instruction))]))
 
-(define-binary-primitive (fx= 'sete))
-(define-binary-primitive (fx< 'setl))
-(define-binary-primitive (fx<= 'setle))
-(define-binary-primitive (fx> 'setg))
-(define-binary-primitive (fx>= 'setge))
-(define-binary-primitive (eq? 'sete))
-(define-binary-primitive (char= 'sete))
+(define-primitive-compare (fx= 'sete))
+(define-primitive-compare (fx< 'setl))
+(define-primitive-compare (fx<= 'setle))
+(define-primitive-compare (fx> 'setg))
+(define-primitive-compare (fx>= 'setge))
+(define-primitive-compare (eq? 'sete))
+(define-primitive-compare (char= 'sete))
 
 (define-variadic-primitive (make-vector)
   (case-lambda
@@ -528,18 +586,6 @@
           (emit "  or  rax, ~s" strtag)
           (emit "  add rbp, rdi"))]))
 
-(define-primitive (vector? si env arg)
-  (emit-expr si env arg #f)
-  (emit "  and al, ~s" 7) ; mask off bits above #b111
-  (emit "  cmp al, ~s" vectag)
-  (emit-true-using 'sete))
-
-(define-primitive (string? si env arg)
-  (emit-expr si env arg #f)
-  (emit "  and al, ~s" 7) ; mask off bits above #b111
-  (emit "  cmp al, ~s" strtag)
-  (emit-true-using 'sete))
-
 (define-primitive (vector-length si env arg)
   (emit-expr si env arg #f)
   ; assuming rax is actually a vector
@@ -561,7 +607,6 @@
   (emit "  or  rax, ~s" fxtag))
 
 (define-primitive (vector-set! si env v index value)
-  (emit ";;; before vector-set!")
   (emit-expr si env value #f)
   (emit "  mov rdx, rax")
   (emit-expr si env index #f)
@@ -572,8 +617,7 @@
   (emit-expr si env v #f)
   (emit "  sar rax, ~s" objshift) ;untag vector
   (emit "  sal rax, ~s" objshift) ;untag vector
-  (emit "  mov [ rax + rbx ], rdx")
-  (emit ";;; vector-set!"))
+  (emit "  mov [ rax + rbx ], rdx"))
 
 (define-primitive (string-set! si env v index value)
   (emit-expr si env value #f)
