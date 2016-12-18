@@ -196,6 +196,13 @@
     (emit-expr si env (if-altern expr) tail?)
     (unless tail? (emit "~a:" end-label))))
 
+; Transform a cond expression into a nested if expression.
+(define (transform-cond expr)
+  (let next-cond ([rem (cdr expr)])
+    (unless (null? rem)
+      `(if ,(caar rem) ,(cadar rem)
+          ,(next-cond (cdr rem))))))
+
 ; Transform an and expression into a nested if expression.
 ; (and a b ...)
 ; (if a (if b #t #f) #f)
