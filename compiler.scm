@@ -62,12 +62,10 @@
                    (putprop 'prim-name '*arg-count*
                             (length '(arg* ...)))
                    (putprop 'prim-name '*emitter*
-                            (lambda (si env arg* ...) b b* ...)))]))
+                            (lambda (si env arg* ...) b b* ...)))]
 
-; This macro is the same as define-primitive, apart from the *emitter* which
-; has no (lambda ... ), this was to allow declaring a lambda-case *emitter*.
-(define-syntax define-variadic-primitive
-  (syntax-rules ()
+; The *emitter* has no (lambda (si env arg* ...) )
+; to allow a case-lambda *emitter* enabling variadic emitters
                 [(_ (prim-name) b b* ...)
                  (begin
                    (putprop 'prim-name '*is-prim* #t)
@@ -108,7 +106,7 @@
 ; Emits assembly for a primitive.
 (define (emit-primcall si env expr tail?)
   (let ([prim (car expr)] [args (cdr expr)])
-    (check-primcall-args prim args)
+    (check-primcall-args prim args) ; TODO: this should error when arg count does not match, what about variadic though?
     (apply (primitive-emitter prim) si env args)
     (if tail? (emit "  ret"))))
 
@@ -551,47 +549,33 @@
 (define-primitive-compare (eq? 'sete))
 (define-primitive-compare (char= 'sete))
 
-(define-variadic-primitive (make-vector)
-  (case-lambda
-    [(si env len) (apply (primitive-emitter 'make-vector) si env (list len #f))]
-    [(si env len val)
-        (let ([label (unique-label)])
-          (emit-expr si env len #f)
-          (emit "  sar rax, ~s" fxshift) ; untag length
-          (emit "  sal rax, 3") ; multiply by 8
-          (emit "  mov [ rbp ], rax")   ; set vector length
-          (emit-expr si env val #f)
-          (emit "  mov rbx, rax") ;
-          (emit "  mov rdi, 8; offset")
-          (emit "~a:" label)
-          (emit "  mov [ rbp + rdi ], rbx")
-          (emit "  add rdi, 8")
-          (emit "  cmp rdi, [ rbp ]")
-          (emit "  jle ~a" label)
-          (emit "  mov rax, rbp")
-          (emit "  or  rax, ~s" vectag)
-          (emit "  add rbp, rdi"))]))
+(define-syntax define-make-vector-of-type
+  (syntax-rules ()
+    [(_ (emitter-name type))
+       (define-primitive (emitter-name)
+        (case-lambda
+          [(si env len)
+             (apply (primitive-emitter 'emitter-name) si env (list len #f))]
+          [(si env len val)
+              (let ([label (unique-label)])
+                (emit-expr si env len #f)
+                (emit "  sar rax, ~s" fxshift) ; untag length
+                (emit "  sal rax, 3") ; multiply by 8
+                (emit "  mov [ rbp ], rax")   ; set vector length
+                (emit-expr si env val #f)
+                (emit "  mov rbx, rax") ;
+                (emit "  mov rdi, 8; offset")
+                (emit "~a:" label)
+                (emit "  mov [ rbp + rdi ], rbx")
+                (emit "  add rdi, 8")
+                (emit "  cmp rdi, [ rbp ]")
+                (emit "  jle ~a" label)
+                (emit "  mov rax, rbp")
+                (emit "  or  rax, ~s"    type  )
+                (emit "  add rbp, rdi"))])) ]))
 
-(define-variadic-primitive (make-string)
-  (case-lambda
-    [(si env len) (apply (primitive-emitter 'make-string) si env (list len #f))]
-    [(si env len val)
-        (let ([label (unique-label)])
-          (emit-expr si env len #f)
-          (emit "  sar rax, ~s" fxshift) ; untag length
-          (emit "  sal rax, 3") ; multiply by 8
-          (emit "  mov [ rbp ], rax")   ; set length
-          (emit-expr si env val #f)
-          (emit "  mov rbx, rax") ;
-          (emit "  mov rdi, 8; offset")
-          (emit "~a:" label)
-          (emit "  mov [ rbp + rdi ], rbx")
-          (emit "  add rdi, 8")
-          (emit "  cmp rdi, [ rbp ]")
-          (emit "  jle ~a" label)
-          (emit "  mov rax, rbp")
-          (emit "  or  rax, ~s" strtag)
-          (emit "  add rbp, rdi"))]))
+(define-make-vector-of-type (make-vector vectag))
+(define-make-vector-of-type (make-string strtag))
 
 (define-primitive (vector-length si env arg)
   (emit-expr si env arg #f)
@@ -603,15 +587,8 @@
   (emit "  sal rax, ~s" fxshift)
   (emit "  or  rax, ~s" fxtag))
 
-(define-primitive (string-length si env arg)
-  (emit-expr si env arg #f)
-  ; assuming rax is actually a string
-  (emit "  sar rax, ~s" objshift) ;untag
-  (emit "  sal rax, ~s" objshift) ;untag
-  (emit "  mov rax, [rax]")
-  (emit "  sar rax, 3") ; divide by 8
-  (emit "  sal rax, ~s" fxshift)
-  (emit "  or  rax, ~s" fxtag))
+(define-primitive (string-length)
+  (getprop 'vector-length '*emitter*))
 
 (define-primitive (vector-set! si env v index value)
   (emit-expr si env value #f)
@@ -626,18 +603,8 @@
   (emit "  sal rax, ~s" objshift) ;untag vector
   (emit "  mov [ rax + rbx ], rdx"))
 
-(define-primitive (string-set! si env v index value)
-  (emit-expr si env value #f)
-  (emit "  mov rdx, rax")
-  (emit-expr si env index #f)
-  (emit "  mov rbx, rax")
-  (emit "  sar rbx, ~s" fxshift); untag index
-  (emit "  sal rbx, 3"); multiply index by 8
-  (emit "  add rbx, 8"); offset index past length
-  (emit-expr si env v #f)
-  (emit "  sar rax, ~s" objshift) ;untag
-  (emit "  sal rax, ~s" objshift) ;untag
-  (emit "  mov [ rax + rbx ], rdx"))
+(define-primitive (string-set!)
+  (getprop 'vector-set! '*emitter*))
 
 (define-primitive (vector-ref si env v index)
   (emit-exprs-load si env v index 'rbx 'rdx)
@@ -648,12 +615,6 @@
   (emit "  add rdx, 8"); offset index past length
   (emit "  mov rax, [ rbx + rdx ]"))
 
-(define-primitive (string-ref si env v index)
-  (emit-exprs-load si env v index 'rbx 'rdx)
-  (emit "  sar rbx, ~s" objshift) ;untag
-  (emit "  sal rbx, ~s" objshift) ;untag
-  (emit "  sar rdx, ~s" fxshift); untag index
-  (emit "  sal rdx, 3"); multiply index by 8
-  (emit "  add rdx, 8"); offset index past length
-  (emit "  mov rax, [ rbx + rdx ]"))
+(define-primitive (string-ref)
+  (getprop 'vector-ref '*emitter*))
 
