@@ -79,9 +79,9 @@ typedef unsigned long ptr;
 /* Print a scheme expression using the LISP parenthesized notation.
  *   x         Scheme expression, in machine word tagged form
  *   depth     Current depth when recursing through nested pairs/lists
- *   from_car  Non-zero when printing the car of a pair/list, indicates nested pair
+ *   is_head   Non-zero when printing the car of a pair/list, indicates nested pair
  */
-static void print_ptr(ptr x, int depth, int from_car) {
+static void print_ptr(ptr x, int depth, int is_head) {
   if ((x & fx_mask) == fx_tag) {
     /* Print the fixnum value */
     printf("%d", ((int)x) >> fx_shift);
@@ -108,7 +108,7 @@ static void print_ptr(ptr x, int depth, int from_car) {
     ptr _cdr = cdr(x);
 
     /* If this is the first pair in a nested pair or list, open parenthesis. */
-    if (from_car) printf("(");
+    if (is_head) printf("(");
 
     /* Print the expression stored in the head of pair. */
     print_ptr(_car, depth+1, 1);
@@ -242,7 +242,7 @@ int main(int argc, char *argv[]) {
   expr = scheme_entry(&ctxt, stack_base, heap_base);
 
   /* Display the result from running the compiled scheme code. */
-  print_ptr(expr, 0 /* depth */, 1 /* from_car */);
+  print_ptr(expr, 0 /* depth */,  (expr & obj_mask) == pair_tag  /* is_head */ );
 
   /* Free the allocated stack and heap memory. */
   deallocate_protected_space(stack_top, stack_size);
