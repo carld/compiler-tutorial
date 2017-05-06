@@ -3,11 +3,12 @@ ARCH=$(shell uname -m)
 
 SCHEME=petite
 
+ENTRY=scheme_entry
+
 ifeq ($(PLATFORM),Linux)
   FORMAT=elf64
   NASM=nasm
   CC=gcc
-  ENTRY=scheme_entry
 endif
 
 # On Darwin this assumes nasm and gcc installed with brew:
@@ -20,10 +21,11 @@ ifeq ($(PLATFORM),Darwin)
   FORMAT=macho64
   NASM=/usr/local/bin/nasm
   CC=/usr/local/bin/gcc-6
-  ENTRY=_scheme_entry
+  NASM_PREFIX= --prefix _
 endif
 
 CFLAGS= -m64 -g -fomit-frame-pointer -Wall -pedantic
+NFLAGS= -g $(NASM_PREFIX)
 
 build: clean stst
 
@@ -31,7 +33,7 @@ stst: stst.o startup.c
 	$(CC) $(CFLAGS) -o stst stst.o startup.c
 
 stst.o: stst.s
-	$(NASM) -g -f $(FORMAT) stst.s -o stst.o
+	$(NASM) $(NFLAGS) -f $(FORMAT) stst.s -o stst.o
 
 clean:
 	rm -f stst.o stst
